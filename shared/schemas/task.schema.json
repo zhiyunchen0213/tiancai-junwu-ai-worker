@@ -31,6 +31,11 @@
       "type": "string",
       "description": "指定 IP 组，如 KPOP、GTA、原创短剧角色"
     },
+    "track": {
+      "type": "string",
+      "default": "kpop-dance",
+      "description": "内容赛道 ID，对应 skills/tracks/{track}/ 目录"
+    },
     "ip_auto_selected": {
       "type": "boolean",
       "default": false,

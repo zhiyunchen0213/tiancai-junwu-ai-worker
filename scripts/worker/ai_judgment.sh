@@ -38,6 +38,16 @@ log_success() {
     echo "[SUCCESS] $1" >&2
 }
 
+# 读取赛道信息 / Read track from task.json
+TASK_JSON="$WORK_DIR/task.json"
+TRACK=$(python3 -c "
+import json
+d = json.load(open('$TASK_JSON'))
+print(d.get('track', 'kpop-dance'))
+" 2>/dev/null || echo "kpop-dance")
+
+log_info "赛道 / Track: $TRACK"
+
 # ============================================================================
 # 第1步: 验证Phase A输出存在
 # Step 1: Validate Phase A outputs exist
