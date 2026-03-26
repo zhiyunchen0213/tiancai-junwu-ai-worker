@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Worker Status",
+  "description": "Worker 心跳状态对象",
+  "type": "object",
+  "required": ["worker_id", "hostname", "status", "last_heartbeat"],
+  "properties": {
+    "worker_id": {
+      "type": "string",
+      "description": "Worker 唯一 ID，格式：worker_{N}"
+    },
+    "hostname": {
+      "type": "string",
+      "description": "Mac mini hostname"
+    },
+    "ip_address": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["idle", "busy", "offline", "error"]
+    },
+    "current_task_id": {
+      "type": "string",
+      "description": "当前正在执行的任务 ID"
+    },
+    "current_task_phase": {
+      "type": "string",
+      "description": "当前任务进度描述"
+    },
+    "jimeng_account_group": {
+      "type": "string",
+      "description": "分配的即梦账号组"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "worker 能力标签，用于定向派单"
+    },
+    "tasks_completed_today": {
+      "type": "integer",
+      "default": 0
+    },
+    "last_heartbeat": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_error": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+video_url,ip_group,priority,direction,forbidden,special_requirements
+https://youtube.com/shorts/EXAMPLE1,KPOP,high,真善美剧情,,
+https://youtube.com/shorts/EXAMPLE2,,normal,热门IP套壳,暴力;色情,需要搞笑风格
+https://youtube.com/shorts/EXAMPLE3,GTA,low,,,保留原版节奏

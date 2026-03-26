@@ -1,0 +1,148 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Pipeline Task",
+  "description": "一条爆款链接进入系统后的标准任务对象",
+  "type": "object",
+  "required": ["task_id", "story_id", "video_url", "status", "created_at"],
+  "properties": {
+    "task_id": {
+      "type": "string",
+      "description": "唯一任务 ID，格式：task_{timestamp}_{hash}"
+    },
+    "story_id": {
+      "type": "string",
+      "description": "所属 story ID，一条链接对应一个 story"
+    },
+    "task_type": {
+      "type": "string",
+      "enum": ["analysis", "variant"],
+      "description": "任务类型：analysis（拆解阶段）或 variant（改编版本）"
+    },
+    "variant_type": {
+      "type": "string",
+      "enum": ["v1_remake", "v2_emotion", "v3_hot_adapt"],
+      "description": "改编版本类型（仅 variant 任务）"
+    },
+    "video_url": {
+      "type": "string",
+      "description": "源视频链接"
+    },
+    "ip_group": {
+      "type": "string",
+      "description": "指定 IP 组，如 KPOP、GTA、原创短剧角色"
+    },
+    "ip_auto_selected": {
+      "type": "boolean",
+      "default": false,
+      "description": "是否由系统自动选择 IP"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["high", "normal", "low"],
+      "default": "normal"
+    },
+    "direction": {
+      "type": "string",
+      "description": "目标方向描述"
+    },
+    "forbidden": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "禁忌列表"
+    },
+    "special_requirements": {
+      "type": "string",
+      "description": "特殊要求"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "running",
+        "harvesting",
+        "completed",
+        "failed"
+      ],
+      "description": "粗粒度任务状态，与文件系统队列目录对应：pending/ → running/ → harvesting/ → completed/ 或 failed/"
+    },
+    "phase": {
+      "type": ["string", "null"],
+      "enum": ["phase_a", "phase_b", "phase_c", null],
+      "description": "当前执行阶段：phase_a=下载分析, phase_b=AI判断, phase_c=即梦提交"
+    },
+    "phase_progress": {
+      "type": ["string", "null"],
+      "enum": [
+        "phase_a_running", "phase_a_complete",
+        "phase_b_running", "phase_b_complete",
+        "phase_c_running", "phase_c_complete",
+        null
+      ],
+      "description": "阶段细粒度进度，用于断点恢复"
+    },
+    "assigned_worker": {
+      "type": "string",
+      "description": "分配的 worker ID"
+    },
+    "jimeng_project_url": {
+      "type": "string",
+      "description": "即梦项目网址"
+    },
+    "jimeng_project_id": {
+      "type": "string",
+      "description": "即梦 project ID"
+    },
+    "jimeng_submitted_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "即梦提交时间，harvest daemon 用于超时判断"
+    },
+    "jimeng_submitted_by": {
+      "type": "string",
+      "description": "提交即梦的 worker ID，harvest daemon 据此认领本机任务"
+    },
+    "gate_mode": {
+      "type": "string",
+      "enum": ["full_review", "auto", "custom"],
+      "default": "full_review",
+      "description": "闸门策略：full_review=全人审, auto=一条龙全自动, custom=自定义哪些闸门生效"
+    },
+    "gates_enabled": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["g1", "g2", "g3", "g4"] },
+      "default": ["g1", "g2", "g3", "g4"],
+      "description": "custom 模式下生效的闸门列表"
+    },
+    "gate_status": {
+      "type": "object",
+      "properties": {
+        "g1": { "type": ["string", "null"], "enum": ["pending", "approved", "rejected", "auto_approved", null] },
+        "g2": { "type": ["string", "null"], "enum": ["pending", "approved", "approved_with_edits", "rejected", "auto_approved", null] },
+        "g3": { "type": ["string", "null"], "enum": ["pending", "approved", "rejected", "auto_approved", null] },
+        "g4": { "type": ["string", "null"], "enum": ["pending", "grade_A", "grade_B", "grade_C", "auto_approved", null] }
+      },
+      "description": "各闸门当前状态"
+    },
+    "retry_count": {
+      "type": "integer",
+      "default": 0
+    },
+    "rework_count": {
+      "type": "integer",
+      "default": 0
+    },
+    "delivery_grade": {
+      "type": "string",
+      "enum": ["A", "B", "C"],
+      "description": "交付等级：A 可直接开剪 / B 需微调 / C 退回返工"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

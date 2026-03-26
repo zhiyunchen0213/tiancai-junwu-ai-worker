@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Pipeline Story",
+  "description": "一条爆款链接的全局视图，包含 analysis + 3 个 variant",
+  "type": "object",
+  "required": ["story_id", "video_url", "status", "created_at"],
+  "properties": {
+    "story_id": {
+      "type": "string",
+      "description": "唯一 story ID，格式：story_{timestamp}_{hash}"
+    },
+    "video_url": {
+      "type": "string"
+    },
+    "video_title": {
+      "type": "string"
+    },
+    "batch_id": {
+      "type": "string",
+      "description": "所属批次 ID（批量入口时有值）"
+    },
+    "ip_group": {
+      "type": "string"
+    },
+    "ip_auto_selected": {
+      "type": "boolean",
+      "default": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "analysis_in_progress",
+        "analysis_done",
+        "variants_in_progress",
+        "variants_done",
+        "delivered",
+        "rework",
+        "failed"
+      ]
+    },
+    "analysis_task_id": {
+      "type": "string"
+    },
+    "variant_task_ids": {
+      "type": "object",
+      "properties": {
+        "v1_remake": { "type": "string" },
+        "v2_emotion": { "type": "string" },
+        "v3_hot_adapt": { "type": "string" }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
