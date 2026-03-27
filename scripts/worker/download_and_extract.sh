@@ -57,7 +57,7 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     elif [[ -n "${YT_COOKIES_BROWSER:-chrome}" ]]; then
         YT_COOKIE_ARGS=(--cookies-from-browser "${YT_COOKIES_BROWSER:-chrome}")
     fi
-    if yt-dlp "${YT_COOKIE_ARGS[@]}" -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
+    if yt-dlp "${YT_COOKIE_ARGS[@]}" --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
         DOWNLOAD_SUCCESS=1
         echo -e "${GREEN}✓ 视频下载成功${NC}"
         break
