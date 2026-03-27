@@ -57,17 +57,17 @@ echo "  ✅ 视频: $(du -h original.mp4 | cut -f1)"
 # 2. 提取帧 + 音频 + 元数据
 echo ""
 echo "[2/5] 提取帧和音频..."
-ffmpeg -y -i original.mp4 -vf fps=1 -q:v 3 frames/frame_%04d.jpg 2>/dev/null
+ffmpeg -y -loglevel quiet -i original.mp4 -vf fps=1 -q:v 3 frames/frame_%04d.jpg
 FRAME_COUNT=$(ls frames/*.jpg 2>/dev/null | wc -l | tr -d ' ')
-echo "  ✅ 提取 $FRAME_COUNT 帧"
+echo "  frames: $FRAME_COUNT"
 
-ffmpeg -y -i original.mp4 -vn -ar 16000 -ac 1 -f wav audio.wav 2>/dev/null
-echo "  ✅ 音频提取完成"
+ffmpeg -y -loglevel quiet -i original.mp4 -vn -ar 16000 -ac 1 -f wav audio.wav
+echo "  audio: done"
 
 DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 original.mp4 2>/dev/null | cut -d. -f1)
 RESOLUTION=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 original.mp4 2>/dev/null)
 python3 -c "import json;json.dump({'duration_seconds':${DURATION:-60},'resolution':'${RESOLUTION:-1080,1920}','frame_count':${FRAME_COUNT:-60}},open('metadata.json','w'))"
-echo "  ✅ 元数据: ${DURATION}s, ${RESOLUTION}"
+echo "  metadata: ${DURATION}s"
 
 # 3. Whisper 转录
 echo ""
