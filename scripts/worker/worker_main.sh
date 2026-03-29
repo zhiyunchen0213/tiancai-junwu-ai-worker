@@ -237,6 +237,99 @@ PYEOF
     ) &
 }
 
+# ============================================================================
+# VPS 任务拉取 (Poll VPS for tasks submitted via dashboard)
+# ============================================================================
+
+poll_vps_task() {
+    # 如果未配置 REVIEW_SERVER_URL 则跳过
+    [[ -z "$REVIEW_SERVER_URL" ]] && return 1
+    [[ -z "$DISPATCHER_TOKEN" ]] && return 1
+
+    local result
+    result=$(W_ID="$WORKER_ID" REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
+        python3 << 'PYEOF'
+import json, os, urllib.request, urllib.error
+
+base = os.environ["REVIEW_URL"].rstrip("/")
+wid = os.environ["W_ID"]
+tok = os.environ["DTOK"]
+headers = {"Content-Type": "application/json", "Authorization": f"Bearer {tok}"}
+
+# Step 1: Poll for pending task
+poll_url = f"{base}/api/v1/tasks/poll?worker_id={wid}"
+req = urllib.request.Request(poll_url, headers=headers)
+try:
+    resp = urllib.request.urlopen(req, timeout=10)
+    data = json.loads(resp.read())
+except Exception as e:
+    print(f"POLL_ERROR:{e}", flush=True)
+    exit(1)
+
+task = data.get("task")
+if not task:
+    print("NO_TASK", flush=True)
+    exit(0)
+
+task_id = task["id"]
+
+# Step 2: Claim it
+claim_url = f"{base}/api/v1/tasks/{task_id}/claim"
+body = json.dumps({"worker_id": wid}).encode("utf-8")
+req2 = urllib.request.Request(claim_url, data=body, headers=headers, method="POST")
+try:
+    resp2 = urllib.request.urlopen(req2, timeout=10)
+    claim_data = json.loads(resp2.read())
+except urllib.error.HTTPError as e:
+    print(f"CLAIM_CONFLICT:{task_id}", flush=True)
+    exit(1)
+except Exception as e:
+    print(f"CLAIM_ERROR:{e}", flush=True)
+    exit(1)
+
+claimed = claim_data.get("task", task)
+
+# Step 3: Write task JSON to local pending dir
+task_json = {
+    "id": task_id,
+    "task_id": task_id,
+    "url": claimed.get("video_url", ""),
+    "video_url": claimed.get("video_url", ""),
+    "synopsis": claimed.get("synopsis"),
+    "track": claimed.get("track", "kpop-dance"),
+    "ip_characters": claimed.get("ip_characters"),
+    "gate_mode": claimed.get("gate_mode", "full_review"),
+    "status": "pending",
+}
+print(f"CLAIMED:{task_id}|" + json.dumps(task_json), flush=True)
+PYEOF
+    ) 2>/dev/null
+
+    if [[ "$result" == NO_TASK ]]; then
+        return 1
+    elif [[ "$result" == POLL_ERROR:* ]] || [[ "$result" == CLAIM_ERROR:* ]]; then
+        log_warn "VPS poll failed: $result"
+        return 1
+    elif [[ "$result" == CLAIM_CONFLICT:* ]]; then
+        log_warn "VPS task already claimed: $result"
+        return 1
+    elif [[ "$result" == CLAIMED:* ]]; then
+        local task_id="${result#CLAIMED:}"
+        task_id="${task_id%%|*}"
+        local task_json="${result#*|}"
+        local task_file="${task_id}.json"
+
+        # 直接写到 running 目录（已在 VPS 上 claim 了）
+        local running_path="${SHARED_DIR}/tasks/running/${WORKER_ID}/${task_file}"
+        echo "$task_json" > "$running_path"
+        log_info "VPS task claimed and written: $task_file"
+        echo "$task_file"
+        return 0
+    fi
+
+    return 1
+}
+
 # 辅助: 读取文件内容用于上报（截断到 max_chars）
 read_for_report() {
     local file="$1"
@@ -744,6 +837,32 @@ while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
     pending_task=$(ls -1 "$SHARED_DIR/tasks/pending/" 2>/dev/null | sort | head -1)
 
     if [[ -z "$pending_task" ]]; then
+        # 本地没任务，尝试从 VPS 拉取看板提交的任务
+        vps_task_file=$(poll_vps_task 2>/dev/null) || true
+        if [[ -n "$vps_task_file" ]]; then
+            log_info "Got task from VPS: ${vps_task_file}"
+            idle_count=0
+
+            # 更新心跳状态为 busy
+            CURRENT_WORKER_STATUS="busy"
+            CURRENT_TASK_ID_FOR_HB="$(basename "$vps_task_file" .json)"
+            send_heartbeat
+
+            # 处理任务
+            if process_task "$vps_task_file"; then
+                log_info "VPS task completed: ${vps_task_file}"
+                ((TASKS_COMPLETED_COUNT++)) || true
+            else
+                log_warn "VPS task had issues: ${vps_task_file}"
+            fi
+
+            # 恢复 idle 状态
+            CURRENT_WORKER_STATUS="idle"
+            CURRENT_TASK_ID_FOR_HB=""
+            send_heartbeat
+            continue
+        fi
+
         CURRENT_WORKER_STATUS="idle"
         CURRENT_TASK_ID_FOR_HB=""
         ((idle_count++)) || true
