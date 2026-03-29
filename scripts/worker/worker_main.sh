@@ -807,39 +807,77 @@ check_and_auto_update() {
     # 找到代码目录（脚本所在的 git 仓库根目录）
     local code_dir
     code_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-    if [[ ! -d "$code_dir/.git" ]]; then
+
+    # 方式 1: 有 .git 目录 → git fetch + pull (GitHub 或其他 remote)
+    if [[ -d "$code_dir/.git" ]]; then
+        if ! git -C "$code_dir" fetch origin main --quiet 2>/dev/null; then
+            # GitHub 不可达（墙），尝试从 VPS 镜像拉取
+            _try_vps_rsync_update "$code_dir"
+            return $?
+        fi
+
+        local local_hash remote_hash
+        local_hash=$(git -C "$code_dir" rev-parse HEAD 2>/dev/null)
+        remote_hash=$(git -C "$code_dir" rev-parse origin/main 2>/dev/null)
+
+        if [[ "$local_hash" == "$remote_hash" ]]; then
+            return 0  # 已是最新
+        fi
+
+        log_info "[AutoUpdate] New code detected (${local_hash:0:7} → ${remote_hash:0:7}), updating..."
+
+        if ! git -C "$code_dir" pull origin main --quiet 2>/dev/null; then
+            log_warn "[AutoUpdate] git pull failed, trying VPS rsync..."
+            _try_vps_rsync_update "$code_dir"
+            return $?
+        fi
+
+        _do_restart
         return 0
     fi
 
-    # 静默检查远端是否有更新
-    if ! git -C "$code_dir" fetch origin main --quiet 2>/dev/null; then
-        return 0  # 网络问题，跳过
+    # 方式 2: 无 .git 目录（rsync 部署的）→ 从 VPS 镜像同步
+    _try_vps_rsync_update "$code_dir"
+}
+
+# 从 VPS 镜像 rsync 更新代码
+_try_vps_rsync_update() {
+    local code_dir="$1"
+    local vps_url="${REVIEW_SERVER_URL:-}"
+    [[ -z "$vps_url" ]] && return 0
+
+    # 从 REVIEW_SERVER_URL 提取 VPS IP
+    local vps_host
+    vps_host=$(echo "$vps_url" | sed -E 's|https?://([^:/]+).*|\1|')
+    [[ -z "$vps_host" ]] && return 0
+
+    # 用 rsync 从 VPS 的 /opt/worker-repo 同步（排除 .git 避免冲突）
+    local before_hash after_hash
+    before_hash=$(md5sum "$code_dir/scripts/worker/worker_main.sh" 2>/dev/null | cut -d' ' -f1)
+
+    if ! rsync -az --delete \
+        --exclude '.git/' \
+        --exclude 'node_modules/' \
+        -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ProxyCommand='cloudflared access ssh --hostname ssh.createflow.art'" \
+        "root@ssh.createflow.art:/opt/worker-repo/" "$code_dir/" 2>/dev/null; then
+        return 0  # VPS 不可达，跳过
     fi
 
-    local local_hash remote_hash
-    local_hash=$(git -C "$code_dir" rev-parse HEAD 2>/dev/null)
-    remote_hash=$(git -C "$code_dir" rev-parse origin/main 2>/dev/null)
+    after_hash=$(md5sum "$code_dir/scripts/worker/worker_main.sh" 2>/dev/null | cut -d' ' -f1)
 
-    if [[ "$local_hash" == "$remote_hash" ]]; then
-        return 0  # 已是最新
+    if [[ "$before_hash" != "$after_hash" ]]; then
+        log_info "[AutoUpdate] Code updated via VPS rsync, restarting..."
+        _do_restart
     fi
+}
 
-    log_info "[AutoUpdate] New code detected (${local_hash:0:7} → ${remote_hash:0:7}), updating..."
-
-    # 拉取最新代码
-    if ! git -C "$code_dir" pull origin main --quiet 2>/dev/null; then
-        log_warn "[AutoUpdate] git pull failed, skipping"
-        return 0
-    fi
-
-    log_info "[AutoUpdate] Code updated, restarting worker..."
-
-    # 发送离线心跳
+# 执行重启
+_do_restart() {
+    log_info "[AutoUpdate] Restarting worker..."
     CURRENT_WORKER_STATUS="offline"
     LAST_HEARTBEAT_TIME=0
     send_heartbeat
     sleep 1
-
     # 用 exec 重启自身（替换当前进程，保留 PID）
     exec bash "${BASH_SOURCE[0]}"
 }
