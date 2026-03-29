@@ -5,32 +5,34 @@
 
 set -euo pipefail
 
+REPO_URL="https://github.com/zhiyunchen0213/tiancai-junwu-ai-worker.git"
+CODE_DIR="$HOME/worker-code"
+
 echo ""
 echo "═══════════════════════════════════════"
 echo "  部署 Worker 心跳修复"
 echo "═══════════════════════════════════════"
 echo ""
 
-# Step 1: 找到代码目录
-CODE_DIR=""
-for d in ~/worker-code ~/production/code; do
-  if [ -d "$d/.git" ]; then
-    CODE_DIR="$d"
-    break
+# Step 1: 确保代码目录是 git 仓库
+if [ -d "$CODE_DIR/.git" ]; then
+  echo "[1/4] 代码目录已存在，拉取更新..."
+  cd "$CODE_DIR"
+  git pull origin main
+else
+  echo "[1/4] 初始化代码目录..."
+  # 备份旧文件（如有）
+  if [ -d "$CODE_DIR" ]; then
+    mv "$CODE_DIR" "${CODE_DIR}.bak.$(date +%s)"
+    echo "  旧目录已备份"
   fi
-done
-
-if [ -z "$CODE_DIR" ]; then
-  echo "❌ 找不到代码目录 (~/worker-code 或 ~/production/code)"
-  exit 1
+  git clone "$REPO_URL" "$CODE_DIR"
+  cd "$CODE_DIR"
 fi
-echo "[1/4] 代码目录: $CODE_DIR"
+echo "  ✅ 代码已就绪"
 
-# Step 2: 拉取最新代码
-cd "$CODE_DIR"
-echo "[2/4] 拉取最新代码..."
-git pull origin main
-echo "  ✅ 代码已更新"
+# 确保 ~/production/code 指向正确位置
+ln -sfn "$CODE_DIR" "$HOME/production/code" 2>/dev/null || true
 
 # Step 3: 停止旧 Worker
 echo "[3/4] 停止旧 Worker 进程..."
