@@ -789,6 +789,65 @@ print(json.dumps({
 # 信号处理 (Signal Handling)
 # ============================================================================
 
+# ============================================================================
+# 自动更新 (Auto Update)
+# ============================================================================
+
+LAST_UPDATE_CHECK=0
+UPDATE_CHECK_INTERVAL=300  # 每 5 分钟检查一次
+
+check_and_auto_update() {
+    local now
+    now=$(date +%s)
+    if (( now - LAST_UPDATE_CHECK < UPDATE_CHECK_INTERVAL )); then
+        return 0
+    fi
+    LAST_UPDATE_CHECK=$now
+
+    # 找到代码目录（脚本所在的 git 仓库根目录）
+    local code_dir
+    code_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+    if [[ ! -d "$code_dir/.git" ]]; then
+        return 0
+    fi
+
+    # 静默检查远端是否有更新
+    if ! git -C "$code_dir" fetch origin main --quiet 2>/dev/null; then
+        return 0  # 网络问题，跳过
+    fi
+
+    local local_hash remote_hash
+    local_hash=$(git -C "$code_dir" rev-parse HEAD 2>/dev/null)
+    remote_hash=$(git -C "$code_dir" rev-parse origin/main 2>/dev/null)
+
+    if [[ "$local_hash" == "$remote_hash" ]]; then
+        return 0  # 已是最新
+    fi
+
+    log_info "[AutoUpdate] New code detected (${local_hash:0:7} → ${remote_hash:0:7}), updating..."
+
+    # 拉取最新代码
+    if ! git -C "$code_dir" pull origin main --quiet 2>/dev/null; then
+        log_warn "[AutoUpdate] git pull failed, skipping"
+        return 0
+    fi
+
+    log_info "[AutoUpdate] Code updated, restarting worker..."
+
+    # 发送离线心跳
+    CURRENT_WORKER_STATUS="offline"
+    LAST_HEARTBEAT_TIME=0
+    send_heartbeat
+    sleep 1
+
+    # 用 exec 重启自身（替换当前进程，保留 PID）
+    exec bash "${BASH_SOURCE[0]}"
+}
+
+# ============================================================================
+# 信号处理 (Signal Handling)
+# ============================================================================
+
 # 优雅关闭：完成当前阶段，不中断任务 (Graceful shutdown)
 cleanup() {
     log_info "Received shutdown signal, gracefully stopping..."
@@ -874,6 +933,10 @@ while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
         if [[ $((idle_count % IDLE_LOG_INTERVAL)) -eq 0 ]]; then
             log_info "No pending tasks (idle for ~$((idle_count * POLL_INTERVAL))s)"
         fi
+
+        # 空闲时检查代码更新（有新版本会自动 pull + 重启）
+        check_and_auto_update
+
         sleep "$POLL_INTERVAL"
         continue
     fi
