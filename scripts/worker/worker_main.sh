@@ -186,6 +186,57 @@ PYEOF
     ) &
 }
 
+# ============================================================================
+# Worker 心跳上报 (Worker Heartbeat)
+# ============================================================================
+
+# 心跳间隔（秒），默认 60 秒
+: "${HEARTBEAT_INTERVAL:=60}"
+LAST_HEARTBEAT_TIME=0
+CURRENT_WORKER_STATUS="idle"
+CURRENT_TASK_ID_FOR_HB=""
+TASKS_COMPLETED_COUNT=0
+
+send_heartbeat() {
+    [[ -z "$REVIEW_SERVER_URL" ]] && return 0
+    [[ -z "$DISPATCHER_TOKEN" ]] && return 0
+
+    local now
+    now=$(date +%s)
+    local elapsed=$((now - LAST_HEARTBEAT_TIME))
+
+    # 节流：未到间隔则跳过
+    [[ $elapsed -lt $HEARTBEAT_INTERVAL ]] && return 0
+
+    LAST_HEARTBEAT_TIME=$now
+
+    (
+        W_ID="$WORKER_ID" W_STATUS="$CURRENT_WORKER_STATUS" \
+        W_COMPLETED="$TASKS_COMPLETED_COUNT" W_TASK="$CURRENT_TASK_ID_FOR_HB" \
+        REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
+        python3 << 'PYEOF'
+import json, os, urllib.request, urllib.error
+
+url = os.environ["REVIEW_URL"].rstrip("/") + "/api/v1/worker/heartbeat"
+body = json.dumps({
+    "worker_id": os.environ["W_ID"],
+    "status": os.environ["W_STATUS"],
+    "tasks_completed": int(os.environ.get("W_COMPLETED", "0")),
+    "current_task": os.environ.get("W_TASK") or None,
+}).encode("utf-8")
+
+req = urllib.request.Request(url, data=body, headers={
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {os.environ['DTOK']}"
+})
+try:
+    urllib.request.urlopen(req, timeout=10)
+except Exception as e:
+    print(f"[heartbeat] failed: {e}", flush=True)
+PYEOF
+    ) &
+}
+
 # 辅助: 读取文件内容用于上报（截断到 max_chars）
 read_for_report() {
     local file="$1"
@@ -646,6 +697,10 @@ print(json.dumps({
 cleanup() {
     log_info "Received shutdown signal, gracefully stopping..."
     SHUTDOWN_REQUESTED=1
+    # 发送离线心跳 (Send offline heartbeat)
+    CURRENT_WORKER_STATUS="offline"
+    LAST_HEARTBEAT_TIME=0  # 强制发送
+    send_heartbeat
     # 等待当前任务完成 (Wait for current task to complete)
     sleep 5
     log_info "Worker shutting down"
@@ -676,12 +731,21 @@ log_info "Worker started, entering main loop (POLL_INTERVAL=${POLL_INTERVAL}s)"
 IDLE_LOG_INTERVAL=20
 idle_count=0
 
+# 启动时立即发一次心跳 (Send initial heartbeat on startup)
+CURRENT_WORKER_STATUS="idle"
+send_heartbeat
+
 # 主循环 (Main loop)
 while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
+    # 每次循环尝试心跳（函数内部自带节流）
+    send_heartbeat
+
     # 扫描待处理任务目录 (Scan for pending tasks)
     pending_task=$(ls -1 "$SHARED_DIR/tasks/pending/" 2>/dev/null | sort | head -1)
 
     if [[ -z "$pending_task" ]]; then
+        CURRENT_WORKER_STATUS="idle"
+        CURRENT_TASK_ID_FOR_HB=""
         ((idle_count++)) || true
         if [[ $((idle_count % IDLE_LOG_INTERVAL)) -eq 0 ]]; then
             log_info "No pending tasks (idle for ~$((idle_count * POLL_INTERVAL))s)"
@@ -704,12 +768,23 @@ while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
 
     log_info "Successfully claimed task: ${pending_task}"
 
+    # 更新心跳状态为 busy
+    CURRENT_WORKER_STATUS="busy"
+    CURRENT_TASK_ID_FOR_HB="$(basename "$pending_task" .json)"
+    send_heartbeat
+
     # 处理任务 (Process the task)
     if process_task "$pending_task"; then
         log_info "Task processing completed successfully: ${pending_task}"
+        ((TASKS_COMPLETED_COUNT++)) || true
     else
         log_warn "Task processing had issues: ${pending_task}"
     fi
+
+    # 任务结束，恢复 idle 状态
+    CURRENT_WORKER_STATUS="idle"
+    CURRENT_TASK_ID_FOR_HB=""
+    send_heartbeat
 done
 
 log_info "Worker main loop exiting"
