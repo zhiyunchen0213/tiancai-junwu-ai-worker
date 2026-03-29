@@ -81,17 +81,19 @@ update_task_json() {
 
     # 使用 python3 更新（与 worker_main.sh 保持一致，避免 jq 依赖）
     if [[ -f "$task_file" ]]; then
-        python3 << PYEOF
-import json, sys
+        TJ_FILE="$task_file" TJ_FIELD="$key" TJ_VALUE="$value" \
+        python3 << 'PYEOF'
+import json, sys, os
 try:
-    with open('${task_file}', 'r') as f:
+    tf = os.environ['TJ_FILE']
+    with open(tf, 'r') as f:
         data = json.load(f)
-    raw = '''${value}'''
+    raw = os.environ['TJ_VALUE']
     if raw == '':
         parsed = None
     elif raw.isdigit():
         parsed = int(raw)
-    elif raw.lower() == 'null' or raw.lower() == 'none':
+    elif raw.lower() in ('null', 'none'):
         parsed = None
     elif raw.lower() == 'true':
         parsed = True
@@ -99,8 +101,8 @@ try:
         parsed = False
     else:
         parsed = raw
-    data['${key}'] = parsed
-    with open('${task_file}', 'w') as f:
+    data[os.environ['TJ_FIELD']] = parsed
+    with open(tf, 'w') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 except Exception as e:
     print(f'Error updating JSON: {e}', file=sys.stderr)
@@ -115,15 +117,16 @@ get_task_field() {
     local default="${3:-}"
 
     if [[ -f "$task_file" ]]; then
+        TJ_FILE="$task_file" TJ_FIELD="$field" TJ_DEFAULT="$default" \
         python3 -c "
-import json
+import json, os
 try:
-    with open('${task_file}', 'r') as f:
+    with open(os.environ['TJ_FILE'], 'r') as f:
         data = json.load(f)
-    val = data.get('${field}', '${default}')
+    val = data.get(os.environ['TJ_FIELD'], os.environ.get('TJ_DEFAULT', ''))
     print('' if val is None else val)
 except:
-    print('${default}')
+    print(os.environ.get('TJ_DEFAULT', ''))
 " 2>/dev/null || echo "$default"
     else
         echo "$default"

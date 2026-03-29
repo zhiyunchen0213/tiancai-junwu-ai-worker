@@ -3,7 +3,7 @@
   "title": "Pipeline Task",
   "description": "一条爆款链接进入系统后的标准任务对象",
   "type": "object",
-  "required": ["task_id", "story_id", "video_url", "status", "created_at"],
+  "required": ["task_id", "video_url", "status", "created_at"],
   "properties": {
     "task_id": {
       "type": "string",
@@ -66,7 +66,8 @@
         "running",
         "harvesting",
         "completed",
-        "failed"
+        "failed",
+        "archived"
       ],
       "description": "粗粒度任务状态，与文件系统队列目录对应：pending/ → running/ → harvesting/ → completed/ 或 failed/"
     },
@@ -115,7 +116,7 @@
     "gates_enabled": {
       "type": "array",
       "items": { "type": "string", "enum": ["g1", "g2", "g3", "g4"] },
-      "default": ["g1", "g2", "g3", "g4"],
+      "default": ["g1", "g2", "g4"],
       "description": "custom 模式下生效的闸门列表"
     },
     "gate_status": {

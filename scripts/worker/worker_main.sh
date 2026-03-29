@@ -58,19 +58,21 @@ update_task_json() {
     local field="$2"
     local value="$3"
 
-    python3 << PYEOF
-import json, sys
+    TJ_FILE="$task_file" TJ_FIELD="$field" TJ_VALUE="$value" \
+    python3 << 'PYEOF'
+import json, sys, os
 
 try:
-    with open('${task_file}', 'r') as f:
+    tf = os.environ['TJ_FILE']
+    with open(tf, 'r') as f:
         data = json.load(f)
-    raw = '''${value}'''
+    raw = os.environ['TJ_VALUE']
     # 自动类型推断：整数、null、布尔值
     if raw == '':
         parsed = None
     elif raw.isdigit():
         parsed = int(raw)
-    elif raw.lower() == 'null' or raw.lower() == 'none':
+    elif raw.lower() in ('null', 'none'):
         parsed = None
     elif raw.lower() == 'true':
         parsed = True
@@ -78,8 +80,8 @@ try:
         parsed = False
     else:
         parsed = raw
-    data['${field}'] = parsed
-    with open('${task_file}', 'w') as f:
+    data[os.environ['TJ_FIELD']] = parsed
+    with open(tf, 'w') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 except Exception as e:
     print(f'Error updating JSON: {e}', file=sys.stderr)
@@ -92,14 +94,15 @@ get_task_field() {
     local task_file="$1"
     local field="$2"
 
+    TJ_FILE="$task_file" TJ_FIELD="$field" \
     python3 -c "
-import json
+import json, os
 try:
-    with open('${task_file}', 'r') as f:
+    with open(os.environ['TJ_FILE'], 'r') as f:
         data = json.load(f)
-    print(data.get('${field}', ''))
+    print(data.get(os.environ['TJ_FIELD'], ''))
 except Exception as e:
-    print('', file=sys.stderr)
+    print('', file=__import__('sys').stderr)
 "
 }
 
@@ -794,10 +797,8 @@ cleanup() {
     CURRENT_WORKER_STATUS="offline"
     LAST_HEARTBEAT_TIME=0  # 强制发送
     send_heartbeat
-    # 等待当前任务完成 (Wait for current task to complete)
-    sleep 5
-    log_info "Worker shutting down"
-    exit 0
+    # 不再强制退出，让主循环检测 SHUTDOWN_REQUESTED 后自然退出
+    # 当前任务会跑完再停 (Let main loop exit naturally after current task completes)
 }
 
 trap cleanup SIGTERM SIGINT
@@ -827,6 +828,10 @@ idle_count=0
 # 启动时立即发一次心跳 (Send initial heartbeat on startup)
 CURRENT_WORKER_STATUS="idle"
 send_heartbeat
+
+# 主循环关闭 strict error mode：phase 函数返回值由调用方显式检查
+# 初始化阶段保留 set -euo pipefail 以捕获配置错误
+set +e
 
 # 主循环 (Main loop)
 while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
