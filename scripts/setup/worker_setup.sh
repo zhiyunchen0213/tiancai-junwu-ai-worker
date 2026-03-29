@@ -1,21 +1,25 @@
 #!/bin/bash
-set -euo pipefail
+# ============================================================
+# worker_setup.sh — Worker Mac mini 一键部署脚本（VPS 架构版）
+#
+# 在新的 Mac mini 上打开终端，粘贴执行：
+#
+#   bash <(curl -sL https://raw.githubusercontent.com/zhiyunchen0213/tiancai-junwu-ai-worker/main/scripts/setup/worker_setup.sh)
+#
+# 或者如果 GitHub 被墙，先从 VPS 拉：
+#   scp root@ssh.createflow.art:/opt/worker-repo/scripts/setup/worker_setup.sh /tmp/ && bash /tmp/worker_setup.sh
+#
+# 会自动完成：
+#   1. 安装所有依赖（brew, yt-dlp, ffmpeg, python3, whisper, node, autossh, cloudflared）
+#   2. 克隆 Worker 代码（GitHub 优先，VPS rsync 备用）
+#   3. 配置环境变量
+#   4. 配置 autossh 反向隧道（远程管理用）
+#   5. 添加 VPS 公钥（允许远程控制）
+#   6. 配置 Chrome 即梦 profile
+#   7. 启动 Worker
+# ============================================================
 
-# ============================================================
-# worker_setup.sh — Worker Mac mini 一键部署脚本
-#
-# 在新的 Mac mini 上运行此脚本，自动完成：
-# 1. 检查系统环境
-# 2. 安装所有依赖工具
-# 3. 挂载主控共享目录
-# 4. 配置环境变量
-# 5. 配置 Chrome 即梦 profile
-# 6. 注册为 Worker
-#
-# 用法:
-#   bash worker_setup.sh --worker-id worker-1 --controller-ip 192.168.1.100
-#
-# ============================================================
+set +eu  # 宽松模式，避免交互式执行时意外退出
 
 # === 颜色 ===
 RED='\033[0;31m'
@@ -25,433 +29,355 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 log_info()  { echo -e "${BLUE}[INFO]${NC} $*"; }
-log_ok()    { echo -e "${GREEN}[✅]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[⚠️]${NC} $*"; }
-log_error() { echo -e "${RED}[❌]${NC} $*"; }
+log_ok()    { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # ============================================================
-# 参数解析
+# 参数收集
 # ============================================================
 
-WORKER_ID=""
-CONTROLLER_IP=""
-CONTROLLER_USER="$(whoami)"
-CONTROLLER_PASS=""
-SHARED_MOUNT="/Volumes/shared"
-CDP_PORT=18781
-SKIP_INSTALL=false
+echo ""
+echo "╔══════════════════════════════════════════════════════╗"
+echo "║      Worker Mac mini 一键部署（VPS 架构）           ║"
+echo "╚══════════════════════════════════════════════════════╝"
+echo ""
 
-print_usage() {
-  echo "用法: bash worker_setup.sh [选项]"
-  echo ""
-  echo "必填参数:"
-  echo "  --worker-id ID         Worker 标识 (如 worker-1)"
-  echo "  --controller-ip IP     主控 Mac mini 的 IP 地址"
-  echo ""
-  echo "可选参数:"
-  echo "  --controller-user USER SMB 用户名 (默认: 当前用户)"
-  echo "  --controller-pass PASS SMB 密码 (不填则交互输入)"
-  echo "  --mount-point PATH     共享目录挂载点 (默认: /Volumes/shared)"
-  echo "  --cdp-port PORT        Chrome CDP 端口 (默认: 18781)"
-  echo "  --skip-install         跳过工具安装 (已安装过的机器)"
-  echo ""
-  echo "示例:"
-  echo "  bash worker_setup.sh --worker-id worker-1 --controller-ip 192.168.1.100"
-}
+# 自动检测本机用户名和 IP
+LOCAL_USER=$(whoami)
+LOCAL_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo "unknown")
 
-while [[ $# -gt 0 ]]; do
-  case $1 in
-    --worker-id)       WORKER_ID="$2"; shift 2 ;;
-    --controller-ip)   CONTROLLER_IP="$2"; shift 2 ;;
-    --controller-user) CONTROLLER_USER="$2"; shift 2 ;;
-    --controller-pass) CONTROLLER_PASS="$2"; shift 2 ;;
-    --mount-point)     SHARED_MOUNT="$2"; shift 2 ;;
-    --cdp-port)        CDP_PORT="$2"; shift 2 ;;
-    --skip-install)    SKIP_INSTALL=true; shift ;;
-    --help|-h)         print_usage; exit 0 ;;
-    *)                 log_error "未知参数: $1"; print_usage; exit 1 ;;
-  esac
+# Worker ID：如果已有 .production.env 则读取，否则询问
+if [[ -f "$HOME/.production.env" ]] && grep -q "WORKER_ID=" "$HOME/.production.env"; then
+    WORKER_ID=$(grep "^WORKER_ID=" "$HOME/.production.env" | cut -d= -f2)
+    echo "检测到已有 Worker ID: $WORKER_ID"
+    echo -n "使用此 ID？(Y/n): "
+    read -r confirm
+    if [[ "$confirm" == "n" || "$confirm" == "N" ]]; then
+        WORKER_ID=""
+    fi
+fi
+
+if [[ -z "${WORKER_ID:-}" ]]; then
+    echo "当前用户: $LOCAL_USER, IP: $LOCAL_IP"
+    echo -n "请输入 Worker ID (如 worker-m1, worker-m2): "
+    read -r WORKER_ID
+    if [[ -z "$WORKER_ID" ]]; then
+        log_error "Worker ID 不能为空"
+        exit 1
+    fi
+fi
+
+# 隧道端口：基于 IP 末位自动计算，或手动指定
+LAST_OCTET=$(echo "$LOCAL_IP" | awk -F. '{print $4}')
+AUTO_PORT=$((2200 + ${LAST_OCTET:-99}))
+echo -n "反向隧道端口 (默认 $AUTO_PORT，直接回车确认): "
+read -r TUNNEL_PORT
+TUNNEL_PORT="${TUNNEL_PORT:-$AUTO_PORT}"
+
+# VPS 配置
+REVIEW_SERVER_URL="https://brain.createflow.art"
+DISPATCHER_TOKEN="kwR2m0GMdeGZu0fSvfcVRJGvWYS255qe"
+VPS_SSH_HOST="ssh.createflow.art"
+VPS_PUBKEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIIdzsU8Ff9nsHgWQFhwNo6KHCxJKg01RnvEv56K5N0tc root@racknerd-ad34366"
+CDP_PORT=9222
+
+echo ""
+log_info "Worker ID: $WORKER_ID"
+log_info "隧道端口: $TUNNEL_PORT"
+log_info "本机 IP: $LOCAL_IP"
+echo ""
+
+# ============================================================
+# Step 1: Homebrew + 工具链
+# ============================================================
+
+log_info "=== [1/7] 安装工具链 ==="
+
+# Homebrew
+if ! command -v brew &>/dev/null; then
+    log_warn "安装 Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
+grep -q 'brew shellenv' ~/.zprofile 2>/dev/null || echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+log_ok "Homebrew"
+
+# 核心工具
+for tool in yt-dlp ffmpeg python3 node git autossh cloudflared; do
+    if command -v "$tool" &>/dev/null; then
+        log_ok "$tool 已安装"
+    else
+        log_info "安装 $tool..."
+        brew install "$tool"
+        log_ok "$tool"
+    fi
 done
 
-if [ -z "$WORKER_ID" ] || [ -z "$CONTROLLER_IP" ]; then
-  log_error "缺少必填参数 --worker-id 和 --controller-ip"
-  print_usage
-  exit 1
-fi
-
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Worker Mac mini 一键部署"
-echo "  Worker ID:     $WORKER_ID"
-echo "  Controller IP: $CONTROLLER_IP"
-echo "═══════════════════════════════════════════════════════"
-echo ""
-
-# ============================================================
-# Step 1: 系统环境检查
-# ============================================================
-
-log_info "Step 1/6: 检查系统环境..."
-
-# 检查 macOS
-if [[ "$(uname)" != "Darwin" ]]; then
-  log_error "此脚本仅支持 macOS"
-  exit 1
-fi
-log_ok "macOS $(sw_vers -productVersion)"
-
-# 检查 Homebrew
-if ! command -v brew &>/dev/null; then
-  log_warn "Homebrew 未安装，正在安装..."
-  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  # Apple Silicon 需要添加 PATH
-  if [[ "$(uname -m)" == "arm64" ]]; then
-    eval "$(/opt/homebrew/bin/brew shellenv)"
-    echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
-  fi
-fi
-log_ok "Homebrew $(brew --version | head -1)"
-
-# 检查网络连通性
-# macOS ping -W 单位为毫秒，用 -t 设置总超时秒数
-if ping -c 1 -t 3 "$CONTROLLER_IP" &>/dev/null; then
-  log_ok "主控 $CONTROLLER_IP 网络可达"
-else
-  log_error "无法连通主控 $CONTROLLER_IP，请检查网络"
-  exit 1
-fi
-
-# ============================================================
-# Step 2: 安装工具链
-# ============================================================
-
-log_info "Step 2/6: 安装工具链..."
-
-if [ "$SKIP_INSTALL" = true ]; then
-  log_warn "跳过工具安装 (--skip-install)"
-else
-  # yt-dlp
-  if command -v yt-dlp &>/dev/null; then
-    log_ok "yt-dlp 已安装: $(yt-dlp --version)"
-  else
-    log_info "安装 yt-dlp..."
-    brew install yt-dlp
-    log_ok "yt-dlp 安装完成"
-  fi
-
-  # ffmpeg
-  if command -v ffmpeg &>/dev/null; then
-    log_ok "ffmpeg 已安装: $(ffmpeg -version | head -1)"
-  else
-    log_info "安装 ffmpeg..."
-    brew install ffmpeg
-    log_ok "ffmpeg 安装完成"
-  fi
-
-  # Python3 + whisper
-  if command -v python3 &>/dev/null; then
-    log_ok "Python3 已安装: $(python3 --version)"
-  else
-    log_info "安装 Python3..."
-    brew install python3
-  fi
-
-  if python3 -c "import whisper" &>/dev/null; then
+# whisper
+if python3 -c "import whisper" &>/dev/null 2>&1; then
     log_ok "openai-whisper 已安装"
-  else
+else
     log_info "安装 openai-whisper..."
-    pip3 install openai-whisper --break-system-packages
-    log_ok "openai-whisper 安装完成"
-  fi
+    pip3 install openai-whisper --break-system-packages 2>/dev/null || pip3 install openai-whisper
+    log_ok "openai-whisper"
+fi
 
-  # Node.js
-  if command -v node &>/dev/null; then
-    log_ok "Node.js 已安装: $(node --version)"
-  else
-    log_info "安装 Node.js..."
-    brew install node
-    log_ok "Node.js 安装完成"
-  fi
-
-  # Playwright
-  if npx playwright-core --version &>/dev/null 2>&1; then
+# playwright-core
+if npm list -g playwright-core &>/dev/null 2>&1; then
     log_ok "playwright-core 已安装"
-  else
+else
     log_info "安装 playwright-core..."
-    npm install -g playwright-core
-    log_ok "playwright-core 安装完成"
-  fi
-
-  # Kimi CLI（检查是否存在，不自动安装）
-  if command -v kimi &>/dev/null; then
-    log_ok "Kimi CLI 已安装"
-  else
-    log_warn "Kimi CLI 未安装，请手动安装: https://github.com/kimiapi/kimi-cli"
-    log_warn "跳过 Kimi CLI，后续 Phase A 分析环节可能失败"
-  fi
+    npm install -g playwright-core 2>/dev/null || true
 fi
 
 # ============================================================
-# Step 3: 挂载主控共享目录
+# Step 2: 克隆 Worker 代码
 # ============================================================
 
-log_info "Step 3/6: 挂载主控共享目录..."
+log_info "=== [2/7] 获取 Worker 代码 ==="
 
-if mount | grep -q "$SHARED_MOUNT"; then
-  log_ok "共享目录已挂载: $SHARED_MOUNT"
+CODE_DIR="$HOME/worker-code"
+
+if [[ -d "$CODE_DIR/.git" ]]; then
+    log_ok "代码目录已存在，更新中..."
+    cd "$CODE_DIR"
+    git pull origin main 2>&1 || log_warn "git pull 失败，使用现有代码"
+    cd - >/dev/null
 else
-  # 创建挂载点
-  sudo mkdir -p "$SHARED_MOUNT"
-
-  # 获取密码
-  if [ -z "$CONTROLLER_PASS" ]; then
-    echo -n "请输入主控 SMB 密码 ($CONTROLLER_USER@$CONTROLLER_IP): "
-    read -s CONTROLLER_PASS
-    echo ""
-  fi
-
-  # 挂载 SMB（URL 编码密码，防止 @#:/ 等特殊字符破坏 URL）
-  ENCODED_PASS=$(python3 -c "from urllib.parse import quote; import os; print(quote(os.environ['CONTROLLER_PASS'], safe=''))" 2>/dev/null || echo "$CONTROLLER_PASS")
-  log_info "挂载 smb://$CONTROLLER_USER@$CONTROLLER_IP/production ..."
-  mount_smbfs "//$CONTROLLER_USER:$ENCODED_PASS@$CONTROLLER_IP/production" "$SHARED_MOUNT"
-
-  if mount | grep -q "$SHARED_MOUNT"; then
-    log_ok "共享目录挂载成功: $SHARED_MOUNT"
-  else
-    log_error "共享目录挂载失败"
-    exit 1
-  fi
+    log_info "从 GitHub 克隆..."
+    if git clone https://github.com/zhiyunchen0213/tiancai-junwu-ai-worker.git "$CODE_DIR" 2>&1; then
+        log_ok "GitHub 克隆成功"
+    else
+        log_warn "GitHub 不可达，从 VPS 同步..."
+        mkdir -p "$CODE_DIR"
+        if command -v cloudflared &>/dev/null; then
+            rsync -az --delete \
+                -e "ssh -o ProxyCommand='cloudflared access ssh --hostname $VPS_SSH_HOST' -o StrictHostKeyChecking=no" \
+                "root@${VPS_SSH_HOST}:/opt/worker-repo/" "$CODE_DIR/" 2>&1
+            log_ok "VPS rsync 成功"
+        else
+            log_error "cloudflared 未安装，无法从 VPS 同步"
+            exit 1
+        fi
+    fi
 fi
 
-# 验证共享目录结构
-if [ -d "$SHARED_MOUNT/tasks/pending" ] && [ -d "$SHARED_MOUNT/assets" ]; then
-  log_ok "共享目录结构验证通过"
-else
-  log_error "共享目录结构不完整，请先在主控运行 init_shared_storage.sh"
-  exit 1
-fi
-
-# 确保 Worker 目录存在
-mkdir -p "$SHARED_MOUNT/tasks/running/$WORKER_ID"
-mkdir -p "$SHARED_MOUNT/logs/$WORKER_ID"
-log_ok "Worker 目录已就绪: $SHARED_MOUNT/tasks/running/$WORKER_ID"
+# 创建 symlink
+mkdir -p "$HOME/production"
+rm -f "$HOME/production/code" 2>/dev/null
+rm -rf "$HOME/production/code" 2>/dev/null
+ln -sfn "$CODE_DIR" "$HOME/production/code"
+log_ok "symlink: ~/production/code -> ~/worker-code"
 
 # ============================================================
-# Step 4: 配置环境变量
+# Step 3: 配置环境变量
 # ============================================================
 
-log_info "Step 4/6: 配置环境变量..."
+log_info "=== [3/7] 配置环境变量 ==="
 
 ENV_FILE="$HOME/.production.env"
 
-# 如果主控上有 .env 模板，先复制
-if [ -f "$SHARED_MOUNT/code/config/.env" ]; then
-  cp "$SHARED_MOUNT/code/config/.env" "$ENV_FILE"
-  log_info "已从主控复制 .env 配置"
+# 保留已有的 API keys
+OLD_YUNWU_KEY=""
+OLD_KIMI_KEY=""
+if [[ -f "$ENV_FILE" ]]; then
+    OLD_YUNWU_KEY=$(grep "^YUNWU_API_KEY=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || true)
+    OLD_KIMI_KEY=$(grep "^KIMI_API_KEY=" "$ENV_FILE" 2>/dev/null | cut -d= -f2 || true)
 fi
 
-# 写入 Worker 专属配置
 cat > "$ENV_FILE" << EOF
-# === 生产线环境配置 (${WORKER_ID}) ===
-# 自动生成于 $(date)
+# === Worker 环境配置 ($WORKER_ID) ===
+# 自动生成于 $(date '+%Y-%m-%d %H:%M:%S')
 
-# Worker 标识
-WORKER_ID=${WORKER_ID}
-
-# 共享存储挂载点
-SHARED_DIR=${SHARED_MOUNT}
-
-# 主控 IP
-CONTROLLER_IP=${CONTROLLER_IP}
-
-# Chrome CDP 端口
-CDP_PORT=${CDP_PORT}
-
-# 即梦 Chrome 用户数据目录
-JIMENG_CHROME_PROFILE=\$HOME/.jimeng-chrome-profile
-
-# AI Agent 调用方式 (claude / codex / openai-api)
+WORKER_ID=$WORKER_ID
+SHARED_DIR=$HOME/production
+REVIEW_SERVER_URL=$REVIEW_SERVER_URL
+DISPATCHER_TOKEN=$DISPATCHER_TOKEN
+CDP_PORT=$CDP_PORT
 AI_AGENT=claude
-
-# 轮询间隔（秒）
 POLL_INTERVAL=30
-
-# 日志级别
+JIMENG_CHROME_PROFILE=\$HOME/.jimeng-chrome-profile
 LOG_LEVEL=info
 
-# === 以下需要手动填写 ===
-
-# 云雾 API Key
-YUNWU_API_KEY=
-
-# Kimi API Key
-KIMI_API_KEY=
+# API Keys（手动填写）
+YUNWU_API_KEY=${OLD_YUNWU_KEY:-}
+KIMI_API_KEY=${OLD_KIMI_KEY:-}
 EOF
 
-log_ok "环境变量已写入: $ENV_FILE"
-log_warn "请手动编辑 $ENV_FILE 填写 API Keys"
-
 # 加入 shell profile
-PROFILE="$HOME/.zprofile"
-if ! grep -q "production.env" "$PROFILE" 2>/dev/null; then
-  echo "" >> "$PROFILE"
-  echo "# 生产线环境变量" >> "$PROFILE"
-  echo "[ -f ~/.production.env ] && source ~/.production.env" >> "$PROFILE"
-  log_ok "已添加到 $PROFILE，下次登录自动加载"
+grep -q "production.env" ~/.zprofile 2>/dev/null || echo '[ -f ~/.production.env ] && source ~/.production.env' >> ~/.zprofile
+source "$ENV_FILE"
+log_ok "环境变量写入 $ENV_FILE"
+
+# ============================================================
+# Step 4: 配置 autossh 反向隧道
+# ============================================================
+
+log_info "=== [4/7] 配置反向隧道 ==="
+
+mkdir -p "$HOME/production/logs"
+
+PLIST_FILE="$HOME/Library/LaunchAgents/com.tiancai.autossh-tunnel.plist"
+AUTOSSH_BIN=$(which autossh)
+CLOUDFLARED_BIN=$(which cloudflared)
+SSH_KEY="$HOME/.ssh/id_ed25519"
+
+# 确保 SSH key 存在
+if [[ ! -f "$SSH_KEY" ]]; then
+    log_info "生成 SSH 密钥..."
+    ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+    log_ok "密钥已生成"
+    echo ""
+    log_warn "=== 重要：请把以下公钥发给天才 ==="
+    cat "${SSH_KEY}.pub"
+    echo ""
+    log_warn "天才需要把这个公钥加到 VPS 的 authorized_keys"
+    echo -n "公钥已发给天才了吗？(按回车继续): "
+    read -r
 fi
 
-# 立即加载
-source "$ENV_FILE"
+# 创建 launchd plist
+cat > "$PLIST_FILE" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tiancai.autossh-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${AUTOSSH_BIN}</string>
+    <string>-M</string><string>0</string>
+    <string>-N</string>
+    <string>-o</string><string>ProxyCommand ${CLOUDFLARED_BIN} access ssh --hostname ${VPS_SSH_HOST}</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-o</string><string>StrictHostKeyChecking=no</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-i</string><string>${SSH_KEY}</string>
+    <string>-R</string><string>${TUNNEL_PORT}:localhost:22</string>
+    <string>root@${VPS_SSH_HOST}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AUTOSSH_GATETIME</key><string>0</string>
+    <key>HOME</key><string>${HOME}</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${HOME}/production/logs/autossh.log</string>
+  <key>StandardErrorPath</key><string>${HOME}/production/logs/autossh.log</string>
+</dict>
+</plist>
+PLISTEOF
+
+# 停止旧的，启动新的
+launchctl unload "$PLIST_FILE" 2>/dev/null || true
+launchctl load "$PLIST_FILE"
+sleep 3
+
+if pgrep -f "autossh" >/dev/null 2>&1; then
+    log_ok "autossh 隧道已启动 (端口 $TUNNEL_PORT)"
+else
+    log_warn "autossh 启动失败，检查 ~/production/logs/autossh.log"
+    tail -5 "$HOME/production/logs/autossh.log" 2>/dev/null
+fi
 
 # ============================================================
-# Step 5: 配置 Chrome + 即梦
+# Step 5: 添加 VPS 公钥（远程管理用）
 # ============================================================
 
-log_info "Step 5/6: 配置 Chrome 即梦 profile..."
+log_info "=== [5/7] 配置远程管理 ==="
+
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+AUTH_FILE="$HOME/.ssh/authorized_keys"
+
+if grep -qF "racknerd-ad34366" "$AUTH_FILE" 2>/dev/null; then
+    log_ok "VPS 公钥已存在"
+else
+    echo "$VPS_PUBKEY" >> "$AUTH_FILE"
+    chmod 600 "$AUTH_FILE"
+    log_ok "VPS 公钥已添加"
+fi
+
+# ============================================================
+# Step 6: Chrome 即梦配置
+# ============================================================
+
+log_info "=== [6/7] 配置 Chrome ==="
 
 CHROME_PROFILE="$HOME/.jimeng-chrome-profile"
+mkdir -p "$CHROME_PROFILE"
 
-if [ -d "$CHROME_PROFILE" ]; then
-  log_ok "Chrome profile 已存在: $CHROME_PROFILE"
-else
-  mkdir -p "$CHROME_PROFILE"
-  log_ok "Chrome profile 已创建: $CHROME_PROFILE"
-fi
-
-# 创建 Chrome 启动脚本
 CHROME_LAUNCHER="$HOME/start_jimeng_chrome.sh"
-cat > "$CHROME_LAUNCHER" << 'SCRIPT'
+cat > "$CHROME_LAUNCHER" << 'CHREOF'
 #!/bin/bash
-# 启动即梦专用 Chrome（带 CDP 端口）
-
-source ~/.production.env
-
+source ~/.production.env 2>/dev/null
 CHROME_APP="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-if [ ! -f "$CHROME_APP" ]; then
-  echo "❌ Google Chrome 未安装"
-  exit 1
-fi
-
-echo "🌐 启动即梦专用 Chrome..."
-echo "   CDP 端口: $CDP_PORT"
-echo "   Profile: $JIMENG_CHROME_PROFILE"
-echo ""
-echo "⚠️  请在 Chrome 中手动登录即梦: https://jimeng.jianying.com"
-echo ""
-
+if [ ! -f "$CHROME_APP" ]; then echo "Google Chrome 未安装"; exit 1; fi
+echo "启动即梦 Chrome (CDP: ${CDP_PORT:-9222})..."
 "$CHROME_APP" \
-  --remote-debugging-port=$CDP_PORT \
-  --user-data-dir="$JIMENG_CHROME_PROFILE" \
-  --no-first-run \
-  --no-default-browser-check \
+  --remote-debugging-port=${CDP_PORT:-9222} \
+  --remote-allow-origins="*" \
+  --user-data-dir="${JIMENG_CHROME_PROFILE:-$HOME/.jimeng-chrome-profile}" \
+  --no-first-run --no-default-browser-check \
   "https://jimeng.jianying.com" &
-
-echo "Chrome 已启动 (PID: $!)"
-echo "验证 CDP: curl http://localhost:$CDP_PORT/json/version"
-SCRIPT
-
+echo "Chrome PID: $!"
+echo "验证: curl http://localhost:${CDP_PORT:-9222}/json/version"
+CHREOF
 chmod +x "$CHROME_LAUNCHER"
-log_ok "Chrome 启动脚本: $CHROME_LAUNCHER"
+log_ok "Chrome 启动脚本: ~/start_jimeng_chrome.sh"
 
 # ============================================================
-# Step 6: 创建 Worker 启动/停止脚本
+# Step 7: 启动 Worker
 # ============================================================
 
-log_info "Step 6/6: 创建 Worker 启动/停止脚本..."
+log_info "=== [7/7] 启动 Worker ==="
 
-# 启动脚本
-WORKER_LAUNCHER="$HOME/start_worker.sh"
-cat > "$WORKER_LAUNCHER" << 'SCRIPT'
-#!/bin/bash
-# 启动 Worker 主循环 + Harvest Daemon
-
-source ~/.production.env
-SCRIPTS_DIR="$SHARED_DIR/code/scripts/worker"
-
-echo "═══════════════════════════════════════"
-echo "  启动 Worker: $WORKER_ID"
-echo "  共享目录: $SHARED_DIR"
-echo "═══════════════════════════════════════"
-
-# 检查共享目录可访问
-if [ ! -d "$SHARED_DIR/tasks/pending" ]; then
-  echo "❌ 共享目录不可访问，请检查 SMB 挂载"
-  exit 1
+# 停止旧进程
+OLD_PIDS=$(pgrep -f "worker_main.sh" 2>/dev/null || true)
+if [[ -n "$OLD_PIDS" ]]; then
+    log_info "停止旧 Worker 进程: $OLD_PIDS"
+    kill $OLD_PIDS 2>/dev/null || true
+    sleep 3
+    kill -9 $(pgrep -f "worker_main.sh" 2>/dev/null) 2>/dev/null || true
 fi
 
-# 检查 Chrome CDP
-if ! curl -s "http://localhost:$CDP_PORT/json/version" &>/dev/null; then
-  echo "⚠️  Chrome CDP 未启动，请先运行 ~/start_jimeng_chrome.sh"
-  echo "   Phase C (即梦提交) 将无法执行"
+source "$HOME/.production.env" 2>/dev/null || true
+LOG_DIR="$HOME/production/logs"
+mkdir -p "$LOG_DIR"
+
+nohup bash "$CODE_DIR/scripts/worker/worker_main.sh" > "$LOG_DIR/worker.log" 2>&1 &
+NEW_PID=$!
+sleep 3
+
+if kill -0 $NEW_PID 2>/dev/null; then
+    echo ""
+    echo "╔══════════════════════════════════════════════════════╗"
+    echo "║              部署完成!                               ║"
+    echo "╠══════════════════════════════════════════════════════╣"
+    echo "║                                                      ║"
+    echo "║  Worker ID:  $WORKER_ID"
+    echo "║  隧道端口:    $TUNNEL_PORT"
+    echo "║  本机 IP:     $LOCAL_IP"
+    echo "║  Worker PID:  $NEW_PID"
+    echo "║                                                      ║"
+    echo "║  自动更新:    已启用（每 5 分钟检查）               ║"
+    echo "║  远程管理:    已启用                                ║"
+    echo "║                                                      ║"
+    echo "║  还需要手动做:                                      ║"
+    echo "║  1. 运行 ~/start_jimeng_chrome.sh 启动 Chrome      ║"
+    echo "║  2. 在 Chrome 中登录 jimeng.jianying.com           ║"
+    echo "║                                                      ║"
+    echo "║  日常命令:                                           ║"
+    echo "║  · 日志: tail -f ~/production/logs/worker.log       ║"
+    echo "║  · 停止: pkill -f worker_main.sh                    ║"
+    echo "║  · 启动: nohup bash ~/worker-code/scripts/worker/   ║"
+    echo "║          worker_main.sh > ~/production/logs/         ║"
+    echo "║          worker.log 2>&1 &                           ║"
+    echo "╚══════════════════════════════════════════════════════╝"
+else
+    log_error "Worker 启动失败"
+    tail -10 "$LOG_DIR/worker.log" 2>/dev/null
 fi
-
-# 启动 Harvest Daemon（后台）
-echo "🔄 启动 Harvest Daemon..."
-nohup bash "$SCRIPTS_DIR/harvest_daemon.sh" \
-  > "$SHARED_DIR/logs/$WORKER_ID/harvest.log" 2>&1 &
-HARVEST_PID=$!
-echo "   Harvest Daemon PID: $HARVEST_PID"
-
-# 启动 Worker 主循环（前台，方便看日志）
-echo "🚀 启动 Worker 主循环..."
-echo "   日志: $SHARED_DIR/logs/$WORKER_ID/"
-echo "   按 Ctrl+C 优雅停止"
-echo ""
-
-bash "$SCRIPTS_DIR/worker_main.sh" 2>&1 | tee "$SHARED_DIR/logs/$WORKER_ID/worker.log"
-
-# 主循环退出后，停止 Harvest Daemon
-echo "停止 Harvest Daemon..."
-kill $HARVEST_PID 2>/dev/null
-echo "Worker 已停止"
-SCRIPT
-
-chmod +x "$WORKER_LAUNCHER"
-log_ok "Worker 启动脚本: $WORKER_LAUNCHER"
-
-# 停止脚本
-WORKER_STOPPER="$HOME/stop_worker.sh"
-cat > "$WORKER_STOPPER" << 'SCRIPT'
-#!/bin/bash
-# 优雅停止 Worker
-
-echo "发送停止信号..."
-
-# 停止 worker_main.sh
-pkill -f "worker_main.sh" 2>/dev/null && echo "✅ Worker 主循环已停止" || echo "Worker 主循环未运行"
-
-# 停止 harvest_daemon.sh
-pkill -f "harvest_daemon.sh" 2>/dev/null && echo "✅ Harvest Daemon 已停止" || echo "Harvest Daemon 未运行"
-
-echo "Worker 已完全停止"
-SCRIPT
-
-chmod +x "$WORKER_STOPPER"
-log_ok "Worker 停止脚本: $WORKER_STOPPER"
-
-# ============================================================
-# 部署完成总结
-# ============================================================
-
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  ✅ Worker 部署完成!"
-echo "═══════════════════════════════════════════════════════"
-echo ""
-echo "  Worker ID:    $WORKER_ID"
-echo "  共享目录:      $SHARED_MOUNT"
-echo "  环境配置:      $ENV_FILE"
-echo ""
-echo "  接下来的步骤:"
-echo "  1. 编辑 ~/.production.env 填写 YUNWU_API_KEY 和 KIMI_API_KEY"
-echo "  2. 运行 ~/start_jimeng_chrome.sh 启动 Chrome 并登录即梦"
-echo "  3. 运行 ~/start_worker.sh 启动 Worker"
-echo ""
-echo "  日常操作:"
-echo "  · 启动: ~/start_worker.sh"
-echo "  · 停止: ~/stop_worker.sh"
-echo "  · 日志: $SHARED_MOUNT/logs/$WORKER_ID/"
-echo ""
-echo "  如需重新登录即梦:"
-echo "  · ~/start_jimeng_chrome.sh"
-echo "═══════════════════════════════════════════════════════"
