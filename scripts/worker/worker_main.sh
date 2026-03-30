@@ -311,10 +311,10 @@ PYEOF
     if [[ "$result" == NO_TASK ]]; then
         return 1
     elif [[ "$result" == POLL_ERROR:* ]] || [[ "$result" == CLAIM_ERROR:* ]]; then
-        log_warn "VPS poll failed: $result"
+        log_warn "VPS poll failed: $result" >&2
         return 1
     elif [[ "$result" == CLAIM_CONFLICT:* ]]; then
-        log_warn "VPS task already claimed: $result"
+        log_warn "VPS task already claimed: $result" >&2
         return 1
     elif [[ "$result" == CLAIMED:* ]]; then
         local task_id="${result#CLAIMED:}"
@@ -325,7 +325,7 @@ PYEOF
         # 直接写到 running 目录（已在 VPS 上 claim 了）
         local running_path="${SHARED_DIR}/tasks/running/${WORKER_ID}/${task_file}"
         echo "$task_json" > "$running_path"
-        log_info "VPS task claimed and written: $task_file"
+        log_info "VPS task claimed and written: $task_file" >&2
         echo "$task_file"
         return 0
     fi
