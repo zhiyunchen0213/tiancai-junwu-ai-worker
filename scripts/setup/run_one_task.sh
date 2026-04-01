@@ -7,7 +7,7 @@ set -euo pipefail
 eval "$(/opt/homebrew/bin/brew shellenv)" 2>/dev/null || true
 
 VPS="http://107.175.215.216"
-TOKEN="kwR2m0GMdeGZu0fSvfcVRJGvWYS255qe"
+TOKEN="${DISPATCHER_TOKEN:?Set DISPATCHER_TOKEN}"
 TASK_ID="task-e2e-$(date +%s)"
 URL="https://www.youtube.com/shorts/Xo0zswJ3qZQ"
 WORK="$HOME/work_${TASK_ID}"

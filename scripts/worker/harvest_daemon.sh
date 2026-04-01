@@ -31,12 +31,19 @@ report_event() {
         TASK_ID="$task_id" EVENT="$event" PAYLOAD="$payload" \
         REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
         python3 -c "
-import json, os, urllib.request
+import json, os, urllib.request, time
 url = os.environ['REVIEW_URL'].rstrip('/') + '/api/v1/tasks/report'
 body = json.dumps({'task_id': os.environ['TASK_ID'], 'event': os.environ['EVENT'], 'payload': json.loads(os.environ['PAYLOAD'])}).encode()
 req = urllib.request.Request(url, data=body, headers={'Content-Type':'application/json','Authorization':f\"Bearer {os.environ['DTOK']}\"})
-try: urllib.request.urlopen(req, timeout=10)
-except Exception as e: print(f'[review-server] {e}')
+for attempt in range(3):
+    try:
+        urllib.request.urlopen(req, timeout=15)
+        break
+    except Exception as e:
+        if attempt < 2:
+            time.sleep(5 * (2 ** attempt))
+        else:
+            print(f'[review-server] {os.environ[\"EVENT\"]} failed after 3 attempts: {e}')
 " 2>/dev/null
     ) &
 }
@@ -81,19 +88,17 @@ update_task_json() {
 
     # 使用 python3 更新（与 worker_main.sh 保持一致，避免 jq 依赖）
     if [[ -f "$task_file" ]]; then
-        TJ_FILE="$task_file" TJ_FIELD="$key" TJ_VALUE="$value" \
-        python3 << 'PYEOF'
-import json, sys, os
+        python3 << PYEOF
+import json, sys
 try:
-    tf = os.environ['TJ_FILE']
-    with open(tf, 'r') as f:
+    with open('${task_file}', 'r') as f:
         data = json.load(f)
-    raw = os.environ['TJ_VALUE']
+    raw = '''${value}'''
     if raw == '':
         parsed = None
     elif raw.isdigit():
         parsed = int(raw)
-    elif raw.lower() in ('null', 'none'):
+    elif raw.lower() == 'null' or raw.lower() == 'none':
         parsed = None
     elif raw.lower() == 'true':
         parsed = True
@@ -101,8 +106,8 @@ try:
         parsed = False
     else:
         parsed = raw
-    data[os.environ['TJ_FIELD']] = parsed
-    with open(tf, 'w') as f:
+    data['${key}'] = parsed
+    with open('${task_file}', 'w') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 except Exception as e:
     print(f'Error updating JSON: {e}', file=sys.stderr)
@@ -117,16 +122,15 @@ get_task_field() {
     local default="${3:-}"
 
     if [[ -f "$task_file" ]]; then
-        TJ_FILE="$task_file" TJ_FIELD="$field" TJ_DEFAULT="$default" \
         python3 -c "
-import json, os
+import json
 try:
-    with open(os.environ['TJ_FILE'], 'r') as f:
+    with open('${task_file}', 'r') as f:
         data = json.load(f)
-    val = data.get(os.environ['TJ_FIELD'], os.environ.get('TJ_DEFAULT', ''))
+    val = data.get('${field}', '${default}')
     print('' if val is None else val)
 except:
-    print(os.environ.get('TJ_DEFAULT', ''))
+    print('${default}')
 " 2>/dev/null || echo "$default"
     else
         echo "$default"
@@ -180,47 +184,88 @@ PYEOF
 check_jimeng_status() {
     local project_id="$1"
 
-    # 调用jimeng_monitor.mjs获取生成状态
-    local monitor_script="$SCRIPT_DIR/jimeng_monitor.mjs"
+    local monitor_script="$SCRIPT_DIR/jimeng/jimeng_monitor.mjs"
 
     if [[ ! -f "$monitor_script" ]]; then
         log_error "找不到 jimeng_monitor.mjs 脚本"
         return 1
     fi
 
-    # 调用监控脚本获取状态
-    local status
-    status=$(node "$monitor_script" \
-        --project-id "$project_id" \
+    # --check-only: 查一次状态输出单行 JSON 然后退出
+    local raw
+    raw=$(node "$monitor_script" \
+        --project "$project_id" \
         --cdp-port "$CDP_PORT" \
-        2>/dev/null || echo "error")
+        --check-only \
+        2>/dev/null || echo '{"overall":"error"}')
 
-    echo "$status"
+    # 从 JSON 提取 overall 字段（complete/generating/failed/error）
+    local overall
+    overall=$(echo "$raw" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('overall','error'))" 2>/dev/null || echo "error")
+
+    echo "$overall"
 }
 
 download_jimeng_video() {
     local project_id="$1"
     local output_dir="$2"
 
-    local monitor_script="$SCRIPT_DIR/jimeng_monitor.mjs"
+    local monitor_script="$SCRIPT_DIR/jimeng/jimeng_monitor.mjs"
 
     if [[ ! -f "$monitor_script" ]]; then
         log_error "找不到 jimeng_monitor.mjs 脚本"
         return 1
     fi
 
-    # 创建输出目录
     mkdir -p "$output_dir"
 
-    # 调用监控脚本下载视频
-    node "$monitor_script" \
-        --project-id "$project_id" \
+    # 用 --check-only 获取视频 URL 列表，然后用 curl 下载
+    local raw
+    raw=$(node "$monitor_script" \
+        --project "$project_id" \
         --cdp-port "$CDP_PORT" \
-        --download \
-        --output-dir "$output_dir" \
-        2>/dev/null || return 1
+        --check-only \
+        2>/dev/null || echo '{}')
 
-    return 0
+    local video_count
+    video_count=$(echo "$raw" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('videos',[])))" 2>/dev/null || echo 0)
+
+    if [[ "$video_count" -eq 0 ]]; then
+        log_error "没有找到可下载的视频"
+        return 1
+    fi
+
+    log_info "开始下载 $video_count 个视频到 $output_dir"
+
+    # 逐个下载
+    echo "$raw" | python3 -c "
+import sys, json, subprocess, os
+d = json.loads(sys.stdin.read())
+output = os.environ.get('OUTPUT_DIR', '/tmp')
+ok = 0
+for i, v in enumerate(d.get('videos', [])):
+    url = v.get('url', '')
+    fn = v.get('filename', f'video_{i+1}.mp4')
+    if not url: continue
+    path = os.path.join(output, fn)
+    r = subprocess.run(['curl', '-sL', '-o', path, url], timeout=120, capture_output=True)
+    if r.returncode == 0 and os.path.getsize(path) > 10000:
+        ok += 1
+        print(f'  ✅ {fn} ({os.path.getsize(path)//1024}KB)')
+    else:
+        print(f'  ❌ {fn} 下载失败')
+print(f'下载完成: {ok}/{len(d.get(\"videos\",[]))}')
+" OUTPUT_DIR="$output_dir" 2>&1
+
+    local downloaded
+    downloaded=$(find "$output_dir" -name "*.mp4" -size +10k 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$downloaded" -gt 0 ]]; then
+        log_info "成功下载 $downloaded 个视频"
+        return 0
+    else
+        log_error "没有视频下载成功"
+        return 1
+    fi
 }
 
 # ============================================================================
@@ -461,15 +506,15 @@ main_loop() {
             done < <(find "$SHARED_DIR/tasks/harvesting" -maxdepth 1 -name "*.json" -type f)
         fi
 
-        # 只在有任务时或每6轮（30分钟）打一次日志
+        # 只在有任务时或每30轮（30分钟）打一次日志
         if [[ $task_count -gt 0 ]]; then
             log_info "本轮扫描完成，处理了 $task_count 个任务"
-        elif [[ $((scan_round % 6)) -eq 0 ]]; then
-            log_info "Harvest Daemon 运行中，暂无harvesting任务 (已运行 $((scan_round * 5)) 分钟)"
+        elif [[ $((scan_round % 30)) -eq 0 ]]; then
+            log_info "Harvest Daemon 运行中，暂无harvesting任务 (已运行 $scan_round 分钟)"
         fi
 
-        # 休眠5分钟
-        sleep 300
+        # 休眠1分钟（从5分钟缩短，加速检测即梦生成完成）
+        sleep 60
     done
 }
 

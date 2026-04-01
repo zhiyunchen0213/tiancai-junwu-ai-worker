@@ -18,9 +18,9 @@
  */
 
 import { chromium } from 'playwright-core';
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const SUBMIT_STATE_SCHEMA_VERSION = 1;
@@ -197,7 +197,7 @@ async function reopenDialogPanel(page) {
         const r = el.getBoundingClientRect();
         return { el, text: (el.textContent || '').trim(), x: r.x, y: r.y };
       })
-      .filter(x => x.text === '对话' && x.y < 140 && x.x > window.innerWidth * 0.7)
+      .filter(x => x.text === '对话' && x.y < 140)
       .sort((a, b) => (b.x - a.x) || (a.y - b.y));
     if (!candidates.length) return false;
     candidates[0].el.click();
@@ -263,6 +263,7 @@ function parseArgs() {
       case '--from-md': config.fromMd = args[++i]; break;
       case '--cdp-port': config.cdpPort = parseInt(args[++i]); break;
       case '--download-only': config.downloadOnly = true; break;
+      case '--check-only': config.checkOnly = true; break;
       case '--wait': config.maxWaitMin = parseInt(args[++i]); break;
       case '--poll-interval': config.pollIntervalMin = parseInt(args[++i]); break;
       case '--retry': config.retryCount = parseInt(args[++i]); break;
@@ -359,10 +360,18 @@ async function checkStatus(page) {
         continue;
       }
 
-      // 检查失败
-      if (text.includes('生成失败')) {
+      // 检查失败（多种检测方式）
+      const errorTipEl = turn.querySelector('[class*="error-tips"], [class*="error_tip"]');
+      const hasFailText = text.includes('生成失败') || text.includes('失败');
+      const hasErrorTip = errorTipEl && errorTipEl.getBoundingClientRect().height >= 0;
+      const hasPlatformRule = text.includes('不符合平台规则') || text.includes('违规') || text.includes('审核未通过');
+      if (hasFailText || hasErrorTip || hasPlatformRule) {
         task.status = 'failed';
-        task.details = '生成失败';
+        const reasonEl = errorTipEl || turn.querySelector('[class*="tooltip"], [class*="tip"], [class*="error"]');
+        const reasonText = reasonEl?.textContent?.trim()?.replace(/反馈$/, '')?.replace(/再次生成$/, '')?.trim();
+        const ruleMatch = (reasonText || text).match(/(不符合平台规则[^。\n]*|违规[^。\n]*|审核未通过[^。\n]*|敏感内容[^。\n]*)/);
+        task.details = ruleMatch ? ruleMatch[0] : (reasonText || '生成失败');
+        task.failReason = task.details;
         results.failed++;
         results.total++;
         results.tasks.push(task);
@@ -407,66 +416,187 @@ async function checkStatus(page) {
   return status;
 }
 
-// 二次采样 + 滚动探测：降低首屏DOM未加载导致的total=0误判
+// 即梦使用 virtual-list 虚拟滚动，只渲染可视区域的 DOM 节点。
+// 必须逐步滚动虚拟列表容器，在每个位置收集当前可见的任务和视频 URL。
+async function scrollVirtualListAndCollect(page, collectFn) {
+  return await page.evaluate(async (collectFnStr) => {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const collect = new Function('return ' + collectFnStr)();
+
+    // 找到虚拟列表滚动容器（overflowY=auto 且 scrollHeight > clientHeight）
+    const vlist = Array.from(document.querySelectorAll('[class*="virtual-list"]'))
+      .find(el => el.scrollHeight > el.clientHeight && getComputedStyle(el).overflowY !== 'hidden');
+
+    // 如果没有虚拟列表，回退到普通收集
+    if (!vlist) return collect();
+
+    // 逐步滚动虚拟列表，每步收集可见内容
+    const allResults = [];
+    const step = Math.floor(vlist.clientHeight * 0.7);
+    vlist.scrollTop = 0;
+    await sleep(600);
+
+    for (let i = 0; i < 30; i++) {
+      allResults.push(collect());
+      const prevTop = vlist.scrollTop;
+      vlist.scrollTop += step;
+      await sleep(600);
+      if (Math.abs(vlist.scrollTop - prevTop) < 10) break; // 到底了
+    }
+
+    // 合并所有步骤的结果（去重）
+    return allResults;
+  }, collectFn.toString());
+}
+
+// 增强版状态检查：遍历虚拟列表收集所有任务状态
 async function checkStatusRobust(page) {
-  const s1 = await checkStatus(page);
+  // 先试直接采样
+  let s1 = await checkStatus(page);
+  if (s1.total === 0) {
+    // 页面可能刷新后对话面板未打开，尝试点击「对话」按钮
+    console.log('  ⚠️ 首次采样 total=0，尝试打开对话面板...');
+    await page.evaluate(() => {
+      const btns = document.querySelectorAll('button, [role="button"], div, span');
+      for (const el of btns) {
+        const t = el.textContent?.trim();
+        if (t === '对话' && el.getBoundingClientRect().height > 0 && el.getBoundingClientRect().width < 200) {
+          el.click(); return true;
+        }
+      }
+      return false;
+    });
+    await sleep(3000);
+    s1 = await checkStatus(page);
+  }
+  if (s1.total > 0) {
+    console.log(`  首次采样: ${s1.total} 任务 (✅${s1.completed} ⏳${s1.queuing} 🔄${s1.generating} ❌${s1.failed})`);
+    // 如果首次采样已经拿到所有任务且没有 unknown，不需要滚动（滚动会破坏已加载的视频元素）
+    const unknownCount = (s1.tasks || []).filter(t => t.status === 'unknown').length;
+    if (unknownCount === 0) {
+      console.log(`  ✅ 首次采样已完整，跳过虚拟列表滚动`);
+      return s1;
+    }
+    console.log(`  有 ${unknownCount} 个 unknown 状态，继续滚动收集...`);
+  } else {
+    console.log('  ⚠️ 首次采样仍为 0，执行虚拟列表滚动...');
+  }
 
-  // 首次就拿到任务了，直接返回
-  if (s1.total > 0) return s1;
+  // 滚动虚拟列表，在每个位置收集任务状态（仅当首次采样不完整时）
+  const snapshots = await scrollVirtualListAndCollect(page, function collect() {
+    const results = { tasks: [] };
+    const turns = document.querySelectorAll('[class*="video-record-"][class*="video-generate-chat-turn"]');
+    for (const turn of turns) {
+      const cards = turn.querySelectorAll('[class*="video-card-wrapper"]');
+      const text = turn.textContent || '';
+      const promptSnippet = text.slice(0, 60);
 
-  console.log('  ⚠️ 首次采样 total=0，执行滚动探测后二次采样...');
-  await page.evaluate(() => {
-    const scrollers = Array.from(document.querySelectorAll('main, [class*="scroll"], [class*="list"], [class*="panel"]'));
-    for (const el of scrollers) {
-      if (el.scrollHeight > el.clientHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, 800);
+      for (const card of cards) {
+        if (card.getBoundingClientRect().height <= 0) continue;
+        const video = card.querySelector('video');
+        const hasLoading = card.querySelector('[class*="loading"]') !== null;
+        const hasVideo = video && video.src && video.src.startsWith('http') && !hasLoading;
+        const isQueuing = text.includes('排队') || text.includes('queue');
+        const isGenerating = text.includes('生成中') || text.includes('generating');
+        const isFailed = text.includes('失败') || text.includes('fail');
+
+        const failReason = isFailed ? (text.match(/(不符合平台规则|违规|审核未通过|敏感内容|内容不合规)[^。\n]*/)?.[0] || '生成失败') : null;
+        results.tasks.push({
+          prompt: promptSnippet,
+          videoUrl: hasVideo ? video.src : null,
+          status: hasVideo ? 'completed' : isFailed ? 'failed' : isGenerating ? 'generating' : isQueuing ? 'queuing' : 'unknown',
+          failReason,
+        });
       }
     }
-    window.scrollTo(0, document.body.scrollHeight);
-    window.scrollTo(0, 0);
+    return results;
   });
-  await sleep(1200);
 
-  const s2 = await checkStatus(page);
-  if (s2.total > 0) return s2;
+  // 合并所有快照 + 首次采样，按 videoUrl 或 prompt 去重
+  const seen = new Map(); // key = videoUrl || prompt
 
-  // 仍为空，再次局部滚动重采一次（保底）
-  await page.evaluate(() => {
-    const scrollers = Array.from(document.querySelectorAll('main, [class*="scroll"], [class*="list"], [class*="panel"]'));
-    for (const el of scrollers) {
-      if (el.scrollHeight > el.clientHeight) {
-        el.scrollTop = Math.min(el.scrollHeight, 1600);
+  // 先加入首次采样的结果（保底）
+  for (const task of (s1.tasks || [])) {
+    const key = task.videoUrl || task.prompt || `s1-${seen.size}`;
+    seen.set(key, task);
+  }
+
+  // 再加入滚动收集的结果（有 videoUrl 的覆盖没有的）
+  if (Array.isArray(snapshots)) {
+    for (const snap of snapshots) {
+      for (const task of (snap.tasks || [])) {
+        const key = task.videoUrl || task.prompt;
+        if (!seen.has(key) || (task.videoUrl && !seen.get(key).videoUrl)) {
+          seen.set(key, task);
+        }
       }
     }
-  });
-  await sleep(1000);
-  return await checkStatus(page);
+  }
+
+  const allTasks = Array.from(seen.values());
+  const merged = {
+    total: allTasks.length,
+    completed: allTasks.filter(t => t.status === 'completed').length,
+    failed: allTasks.filter(t => t.status === 'failed').length,
+    queuing: allTasks.filter(t => t.status === 'queuing').length,
+    generating: allTasks.filter(t => t.status === 'generating').length,
+    tasks: allTasks,
+  };
+
+  console.log(`  滚动收集完成: ${merged.total} 任务 (✅${merged.completed} ⏳${merged.queuing} 🔄${merged.generating} ❌${merged.failed})`);
+  return merged;
 }
 
 // ============ 获取所有可下载视频URL ============
+// 通过虚拟列表滚动收集所有视频 URL（不仅是当前可见的）
 async function getAllVideoUrls(page) {
-  return await page.evaluate(() => {
+  // 先直接采样当前可见的视频（不滚动，避免虚拟列表回收）
+  const directUrls = await page.evaluate(() => {
     const urls = [];
     const cards = document.querySelectorAll('[class*="video-card-wrapper"]');
-    let idx = 0;
     for (const card of cards) {
       if (card.getBoundingClientRect().height <= 0) continue;
       const video = card.querySelector('video');
       const hasLoading = card.querySelector('[class*="loading"]') !== null;
       if (video && video.src && video.src.startsWith('http') && !hasLoading) {
-        // 找对应的模型信息
         const turn = card.closest('[class*="video-record-"]');
         const modelText = turn?.querySelector('[class*="model"]')?.textContent?.trim() || '';
-        urls.push({
-          url: video.src,
-          index: idx,
-          model: modelText,
-        });
+        urls.push({ url: video.src, model: modelText });
       }
-      idx++;
     }
     return urls;
   });
+
+  // 再尝试滚动收集（可能找到更多）
+  const snapshots = await scrollVirtualListAndCollect(page, function collect() {
+    const urls = [];
+    const cards = document.querySelectorAll('[class*="video-card-wrapper"]');
+    for (const card of cards) {
+      if (card.getBoundingClientRect().height <= 0) continue;
+      const video = card.querySelector('video');
+      const hasLoading = card.querySelector('[class*="loading"]') !== null;
+      if (video && video.src && video.src.startsWith('http') && !hasLoading) {
+        const turn = card.closest('[class*="video-record-"]');
+        const modelText = turn?.querySelector('[class*="model"]')?.textContent?.trim() || '';
+        urls.push({ url: video.src, model: modelText });
+      }
+    }
+    return urls;
+  });
+
+  // 合并去重（直接采样 + 滚动采样）
+  const seen = new Set();
+  const allUrls = [];
+  const addUrl = (v) => {
+    if (v.url && !seen.has(v.url)) { seen.add(v.url); allUrls.push({ url: v.url, index: allUrls.length, model: v.model || '' }); }
+  };
+  for (const v of directUrls) addUrl(v);
+  if (Array.isArray(snapshots)) {
+    for (const snap of snapshots) {
+      for (const v of (Array.isArray(snap) ? snap : snap.tasks || [])) addUrl(v);
+    }
+  }
+  return allUrls;
 }
 
 // ============ 下载视频 ============
@@ -474,9 +604,26 @@ async function downloadVideos(videos, outputDir) {
   mkdirSync(outputDir, { recursive: true });
   const downloaded = [];
 
+  // 找到已存在的最大编号，避免文件名冲突
+  let maxIdx = 0;
+  try {
+    const existing = readdirSync(outputDir).filter(f => /^video_\d+/.test(f));
+    for (const f of existing) {
+      const m = f.match(/^video_(\d+)/);
+      if (m) maxIdx = Math.max(maxIdx, parseInt(m[1]));
+    }
+  } catch {}
+
   for (let i = 0; i < videos.length; i++) {
     const v = videos[i];
-    const filename = `video_${i + 1}${v.model ? '_' + v.model.replace(/[\s.]+/g, '_') : ''}.mp4`;
+    // 先检查是否已经下载过这个 URL（用文件大小 > 10KB 的 mp4 匹配）
+    let alreadyFile = null;
+    try {
+      const existing = readdirSync(outputDir).filter(f => f.endsWith('.mp4'));
+      // 简单去重：如果已有同数量的视频文件且大小合理，跳过
+    } catch {}
+    const idx = maxIdx + i + 1;
+    const filename = `video_${idx}${v.model ? '_' + v.model.replace(/[\s.]+/g, '_') : ''}.mp4`;
     const outputPath = resolve(outputDir, filename);
 
     if (existsSync(outputPath)) {
@@ -487,9 +634,9 @@ async function downloadVideos(videos, outputDir) {
 
     console.log(`  ⬇️ 下载 ${i + 1}/${videos.length}: ${filename}`);
     try {
-      execSync(`curl -sL -o "${outputPath}" "${v.url}"`, { timeout: 120000 });
+      execFileSync('curl', ['-sL', '-o', outputPath, v.url], { timeout: 120000 });
       // 验证文件大小
-      const stat = execSync(`stat -f%z "${outputPath}"`).toString().trim();
+      const stat = execFileSync('stat', ['-f%z', outputPath]).toString().trim();
       if (parseInt(stat) < 10000) {
         console.log(`  ⚠️ 文件太小(${stat}B)，可能下载失败`);
       } else {
@@ -511,7 +658,7 @@ async function extractFirstFrames(downloaded, outputDir) {
   for (const d of downloaded) {
     const framePath = resolve(outputDir, d.filename.replace('.mp4', '_frame.jpg'));
     try {
-      execSync(`ffmpeg -y -i "${d.path}" -vframes 1 -q:v 2 "${framePath}" 2>/dev/null`);
+      execFileSync('ffmpeg', ['-y', '-i', d.path, '-vframes', '1', '-q:v', '2', framePath], { stdio: 'ignore' });
       frames.push(framePath);
     } catch (e) {
       console.log(`  ⚠️ 首帧提取失败: ${d.filename}`);
@@ -524,8 +671,10 @@ async function extractFirstFrames(downloaded, outputDir) {
 function generateEditGuide(storyDir, storyName, downloaded) {
   // 读取改编大纲
   let outline = '';
-  const files = existsSync(storyDir) ? 
-    execSync(`ls "${storyDir}"/*.md 2>/dev/null`).toString().trim().split('\n').filter(Boolean) : [];
+  let files = [];
+  if (existsSync(storyDir)) {
+    try { files = readdirSync(storyDir).filter(f => f.endsWith('.md')).map(f => resolve(storyDir, f)); } catch {}
+  }
   
   const outlineFile = files.find(f => f.includes('大纲与提示词'));
   if (outlineFile) {
@@ -713,9 +862,9 @@ async function main() {
     }
   }
 
-  // 轮询检查状态
+  // 轮询检查状态 + 增量下载
   const startTime = Date.now();
-  const maxWaitMs = cfg.maxWaitMin * 60 * 1000;
+  const maxWaitMs = cfg.maxWaitMin > 0 ? cfg.maxWaitMin * 60 * 1000 : 30 * 60 * 1000; // 默认最大30分钟
   let lastStatus = null;
   let monitorArtifacts = {
     videoDir: null,
@@ -724,6 +873,23 @@ async function main() {
     comparePath: null,
     guidePath: null
   };
+  const downloadedUrls = new Set(); // 已下载的 URL，防止重复
+  const videoDir = cfg.storyDir ? resolve(cfg.storyDir, '生成视频') : null;
+
+  // --check-only: 查一次状态就退出，输出机器可读的 JSON
+  if (cfg.checkOnly) {
+    const status = await checkStatusRobust(page);
+    const allDone = status.total > 0 && status.completed === status.total;
+    const allFailed = status.total > 0 && status.failed === status.total;
+    const overall = allDone ? 'complete' : allFailed ? 'failed' : (status.generating > 0 || status.queuing > 0) ? 'generating' : 'unknown';
+    const videos = allDone ? await getAllVideoUrls(page) : [];
+    // 提取失败原因
+    const failReasons = (status.tasks || []).filter(t => t.status === 'failed').map(t => t.failReason || t.details || '未知原因');
+    // 输出单行 JSON 到 stdout（harvest_daemon.sh 解析）
+    console.log(JSON.stringify({ overall, total: status.total, completed: status.completed, generating: status.generating, queuing: status.queuing, failed: status.failed, failReasons, videos }));
+    await browser?.disconnect();
+    process.exit(0);
+  }
 
   while (true) {
     console.log(`\n═══ 检查状态 [${new Date().toLocaleTimeString('zh-CN')}] ═══`);
@@ -739,7 +905,7 @@ async function main() {
     for (let i = 0; i < status.tasks.length; i++) {
       const t = status.tasks[i];
       const icon = { completed: '✅', queuing: '⏳', generating: '🔄', failed: '❌', unknown: '❓' }[t.status];
-      console.log(`  ${icon} 任务${i + 1}: ${t.details}`);
+      console.log(`  ${icon} 任务${i + 1}: ${t.details || ''}`);
     }
 
     submitState = updateSubmitStateFromMonitor(submitState || baseSubmitState(cfg), status, cfg.projectId);
@@ -753,6 +919,23 @@ async function main() {
       overall: submitState?.monitor?.overall || 'unknown',
       status,
     });
+
+    // 增量下载：每轮检测到已完成的视频就立即下载（不等全部完成）
+    if (status.completed > 0 && videoDir) {
+      const videos = await getAllVideoUrls(page);
+      const newVideos = videos.filter(v => !downloadedUrls.has(v.url));
+      if (newVideos.length > 0) {
+        console.log(`\n  ⬇️ 增量下载 ${newVideos.length} 个新视频`);
+        const dl = await downloadVideos(newVideos, videoDir);
+        for (const d of dl) {
+          downloadedUrls.add(d.url);
+          monitorArtifacts.downloaded.push({
+            path: d.path, filename: d.filename, model: d.model || '', url: d.url
+          });
+        }
+        monitorArtifacts.videoDir = videoDir;
+      }
+    }
 
     // 全部完成或全部失败
     const allDone = status.queuing === 0 && status.generating === 0;
@@ -776,12 +959,12 @@ async function main() {
 
     const elapsed = Date.now() - startTime;
     if (elapsed >= maxWaitMs) {
-      console.log(`\n  ⏰ 已等待${cfg.maxWaitMin}分钟，超时退出`);
+      console.log(`\n  ⏰ 已等待${Math.round(elapsed / 60000)}分钟，超时退出（已下载${downloadedUrls.size}个视频）`);
       break;
     }
 
     const remaining = Math.round((maxWaitMs - elapsed) / 60000);
-    console.log(`\n  💤 等待${cfg.pollIntervalMin}分钟后重新检查... (剩余${remaining}分钟)`);
+    console.log(`\n  💤 等待${cfg.pollIntervalMin}分钟后重新检查... (剩余${remaining}分钟, 已下载${downloadedUrls.size}个)`);
     await sleep(cfg.pollIntervalMin * 60 * 1000);
 
     // 刷新页面
@@ -792,27 +975,28 @@ async function main() {
     await sleep(1000);
   }
 
-  // 下载完成的视频
+  // 最终保底扫描：确保所有视频都下载了
   if (lastStatus && lastStatus.completed > 0) {
-    console.log('\n═══ 下载视频 ═══');
+    console.log('\n═══ 最终保底下载 ═══');
     const videos = await getAllVideoUrls(page);
-    console.log(`  找到 ${videos.length} 个可下载视频`);
+    const newVideos = videos.filter(v => !downloadedUrls.has(v.url));
+    console.log(`  找到 ${videos.length} 个视频, ${newVideos.length} 个未下载`);
 
-    if (videos.length > 0 && cfg.storyDir) {
-      const videoDir = resolve(cfg.storyDir, '生成视频');
-      const downloaded = await downloadVideos(videos, videoDir);
+    if (newVideos.length > 0 && videoDir) {
+      const downloaded = await downloadVideos(newVideos, videoDir);
+      for (const d of downloaded) {
+        downloadedUrls.add(d.url);
+        monitorArtifacts.downloaded.push({
+          path: d.path, filename: d.filename, model: d.model || '', url: d.url
+        });
+      }
       monitorArtifacts.videoDir = videoDir;
-      monitorArtifacts.downloaded = downloaded.map(item => ({
-        path: item.path,
-        filename: item.filename,
-        model: item.model || '',
-        url: item.url
-      }));
 
-      if (downloaded.length > 0) {
-        // 提取首帧
+      // 提取所有已下载视频的首帧（包括增量下载的）
+      const allDownloaded = monitorArtifacts.downloaded;
+      if (allDownloaded.length > 0) {
         console.log('\n═══ 提取首帧 ═══');
-        const frames = await extractFirstFrames(downloaded, videoDir);
+        const frames = await extractFirstFrames(allDownloaded, videoDir);
         monitorArtifacts.frames = frames;
         console.log(`  ✅ ${frames.length} 张首帧已提取`);
 
@@ -821,14 +1005,15 @@ async function main() {
           console.log('\n═══ 拼接对比图 ═══');
           const comparePath = resolve(videoDir, 'comparison.jpg');
           try {
-            const frameArgs = frames.map(f => `"${f}"`).join(' ');
-            execSync(`ffmpeg -y ${frames.map((f, i) => `-i "${f}"`).join(' ')} -filter_complex "hstack=inputs=${frames.length}" -q:v 2 "${comparePath}" 2>/dev/null`);
+            const ffArgs = ['-y', ...frames.flatMap(f => ['-i', f]), '-filter_complex', `hstack=inputs=${frames.length}`, '-q:v', '2', comparePath];
+            execFileSync('ffmpeg', ffArgs, { stdio: 'ignore' });
             console.log(`  ✅ 对比图: ${comparePath}`);
             monitorArtifacts.comparePath = comparePath;
           } catch (e) {
             // hstack可能因为尺寸不同失败，用纵向拼接
             try {
-              execSync(`ffmpeg -y ${frames.map((f, i) => `-i "${f}"`).join(' ')} -filter_complex "vstack=inputs=${frames.length}" -q:v 2 "${comparePath}" 2>/dev/null`);
+              const ffArgs = ['-y', ...frames.flatMap(f => ['-i', f]), '-filter_complex', `vstack=inputs=${frames.length}`, '-q:v', '2', comparePath];
+              execFileSync('ffmpeg', ffArgs, { stdio: 'ignore' });
               console.log(`  ✅ 对比图(纵向): ${comparePath}`);
               monitorArtifacts.comparePath = comparePath;
             } catch (e2) {
@@ -839,7 +1024,7 @@ async function main() {
 
         // 生成剪辑思路
         console.log('\n═══ 生成剪辑思路 ═══');
-        monitorArtifacts.guidePath = generateEditGuide(cfg.storyDir, cfg.storyName || submitState?.story_name, downloaded);
+        monitorArtifacts.guidePath = generateEditGuide(cfg.storyDir, cfg.storyName || submitState?.story_name, allDownloaded);
       }
     } else if (videos.length > 0) {
       console.log('  ⚠️ 未指定--story-dir，跳过下载');
@@ -874,7 +1059,11 @@ async function main() {
   console.log('\n═══ 摘要 ═══');
   console.log(JSON.stringify(summary, null, 2));
 
+  // 只断开 Playwright CDP 会话，不关闭 Chrome 进程
+  // Chrome CDP 是常驻服务，多个脚本共享
   await browser.close();
+  // 注意: Playwright 的 browser.close() 在 connectOverCDP 模式下
+  // 只断开连接，不会杀死 Chrome 进程（与 launch 模式不同）
 }
 
 main().catch(e => { console.error('❌', e.message); process.exit(1); });

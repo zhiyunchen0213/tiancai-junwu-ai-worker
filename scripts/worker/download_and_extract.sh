@@ -50,12 +50,31 @@ DOWNLOAD_SUCCESS=0
 while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     echo "下载尝试 $ATTEMPT/$MAX_ATTEMPTS..."
 
-    # YouTube 反爬需要登录态 cookies；优先用 --cookies-from-browser，fallback 到 --cookies 文件
+    # YouTube 反爬需要登录态 cookies
+    # 优先级: YT_COOKIES_FILE > Safari binary cookies (cp + convert) > --cookies-from-browser
     YT_COOKIE_ARGS=()
     if [[ -n "${YT_COOKIES_FILE:-}" ]] && [[ -f "$YT_COOKIES_FILE" ]]; then
         YT_COOKIE_ARGS=(--cookies "$YT_COOKIES_FILE")
-    elif [[ -n "${YT_COOKIES_BROWSER:-chrome}" ]]; then
-        YT_COOKIE_ARGS=(--cookies-from-browser "${YT_COOKIES_BROWSER:-chrome}")
+    elif [[ "${YT_COOKIES_BROWSER:-}" == "safari" ]]; then
+        # Safari cookie 由 macking 中控机每 5 分钟推送到 /tmp/safari-cookies-macking.bin
+        # 优先用 macking 的共享 cookie（统一维护），fallback 到本机 cookie
+        SAFARI_BIN="/tmp/safari-cookies-macking.bin"
+        [[ ! -f "$SAFARI_BIN" ]] && SAFARI_BIN="/tmp/safari-cookies-$USER.bin"
+        COOKIES_TXT="/tmp/yt-cookies-$USER.txt"
+        if [[ -f "$SAFARI_BIN" ]]; then
+            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            if python3 "$SCRIPT_DIR/safari_cookies_export.py" "$SAFARI_BIN" "$COOKIES_TXT" 2>/dev/null; then
+                YT_COOKIE_ARGS=(--cookies "$COOKIES_TXT")
+            else
+                echo "警告: Safari cookie 转换失败" >&2
+                YT_COOKIE_ARGS=(--cookies-from-browser safari)
+            fi
+        else
+            echo "警告: Safari cookie 文件未找到 ($SAFARI_BIN)，cookie-sync LaunchAgent 可能未运行" >&2
+            YT_COOKIE_ARGS=(--cookies-from-browser safari)
+        fi
+    elif [[ -n "${YT_COOKIES_BROWSER:-}" ]]; then
+        YT_COOKIE_ARGS=(--cookies-from-browser "${YT_COOKIES_BROWSER}")
     fi
     if yt-dlp "${YT_COOKIE_ARGS[@]}" --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
         DOWNLOAD_SUCCESS=1
@@ -138,7 +157,7 @@ DURATION=$(ffprobe -v error -show_entries format=duration \
 # 获取分辨率
 RESOLUTION=$(ffprobe -v error -select_streams v:0 \
     -show_entries stream=width,height \
-    -of csv=p=0 "$WORK_DIR/original.mp4" 2>/dev/null || echo "unknown")
+    -of csv=p=0 "$WORK_DIR/original.mp4" 2>/dev/null || echo "0,0")
 
 # 获取比特率
 BITRATE=$(ffprobe -v error -show_entries format=bit_rate \

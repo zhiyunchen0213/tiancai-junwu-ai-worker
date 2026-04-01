@@ -454,27 +454,44 @@ async function getVisibleToolbar(page) {
 
 /** 打开指定combobox，返回可见弹窗文本 */
 async function openComboAt(page, idx) {
+  // 滚动到可见区域
   await page.evaluate((i) => {
     const el = document.querySelectorAll('[role="combobox"]')[i];
-    if (!el) return;
-    const r = el.getBoundingClientRect();
-    const opts = { bubbles: true, cancelable: true, clientX: r.x + r.width/2, clientY: r.y + r.height/2, button: 0 };
-    el.dispatchEvent(new PointerEvent('pointerdown', opts));
-    el.dispatchEvent(new MouseEvent('mousedown', opts));
-    el.dispatchEvent(new PointerEvent('pointerup', opts));
-    el.dispatchEvent(new MouseEvent('mouseup', opts));
-    el.dispatchEvent(new MouseEvent('click', opts));
-    el.focus();
+    if (el) el.scrollIntoView({ block: 'center', inline: 'center' });
   }, idx);
-  await sleep(800);
-  return page.evaluate(() => {
-    for (const pop of document.querySelectorAll('[class*="lv-select-popup"]')) {
-      if (pop.getBoundingClientRect().height > 0) {
-        return pop.textContent?.trim().slice(0, 400) || '';
-      }
+  await sleep(200);
+
+  // 最多尝试 3 次点击，确保 popup 弹出
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // 先关闭可能残留的 popup
+    await page.evaluate(() => { document.activeElement?.blur(); });
+    await sleep(150);
+
+    try {
+      const combo = page.locator('[role="combobox"]').nth(idx);
+      await combo.click({ timeout: 3000 });
+    } catch {
+      // fallback: JS click
+      await page.evaluate((i) => {
+        const el = document.querySelectorAll('[role="combobox"]')[i];
+        if (el) { el.scrollIntoView({ block: 'center' }); el.click(); el.focus(); }
+      }, idx);
     }
-    return '';
-  });
+    await sleep(800);
+
+    const text = await page.evaluate(() => {
+      for (const pop of document.querySelectorAll('[class*="lv-select-popup"]')) {
+        if (pop.getBoundingClientRect().height > 0) {
+          return pop.textContent?.trim().slice(0, 400) || '';
+        }
+      }
+      return '';
+    });
+    if (text) return text;
+    // popup 没弹出，重试
+    if (attempt < 2) await sleep(500);
+  }
+  return '';
 }
 
 function classifyPopupText(text) {
@@ -1451,7 +1468,7 @@ async function inspectStrictDialogPanel(page) {
 
   const hasVideoMode = (currentMode && currentMode.includes('视频生成')) || roleMap.refMode !== undefined;
   const hasAllPowerRef = !!(currentRefMode && currentRefMode.includes('全能参考'));
-  const hasToolbar = !!(toolbar.exists && toolbar.childCount >= 6);
+  const hasToolbar = !!(toolbar.exists && toolbar.childCount >= 4);
   const hasRightEditor = !!(editor && editor.w > 200 && editor.h > 20 && editor.x > 300);
   const hasPopoverToolbar = !!(currentRefMode && currentMode && hasRightEditor);
   const hasUpload = (health.visibleFileInputs || 0) > 0;
@@ -2097,7 +2114,7 @@ async function main() {
       // --- 上传参考图（zoom=1状态） ---
       console.log(`\n  --- 上传参考图 ---`);
       await uploadRefs(page, batch.refs);
-      await sleep(4000);
+      await sleep(2000);
 
       // --- zoom=0.7 设比例+时长+提示词+@引用 ---
       await page.evaluate(() => { document.body.style.zoom = '0.7'; });
@@ -2127,14 +2144,11 @@ async function main() {
       for (const ref of atRefsBySearchLen) {
         const placeholder = `##REF_${ref.label}##`;
         const search = ref.search || '';
-        if (search.startsWith('@')) {
-          const roleName = search.slice(1).trim();
-          const hasInlineName = promptToInsert.includes(`${search}（`) || promptToInsert.includes(`${search} (`);
-          const replacement = hasInlineName ? placeholder : `${placeholder}（${roleName}）`;
-          promptToInsert = promptToInsert.replaceAll(search, replacement);
-        } else {
-          promptToInsert = promptToInsert.replaceAll(search, placeholder);
-        }
+        // @name → 占位符 + 名字（不加括号）
+        // 例: @Rumi → ##REF_图片1## Rumi，即梦里显示为 [图片1] Rumi
+        const name = search.startsWith('@') ? search.slice(1).trim() : '';
+        const replacement = name ? `${placeholder} ${name}` : placeholder;
+        promptToInsert = promptToInsert.replaceAll(search, replacement);
       }
       await inputPrompt(page, context, promptToInsert);
 
@@ -2357,6 +2371,70 @@ async function main() {
     if (storyAbortReason) {
       console.log(`⛔ 因错误停止后续批次：${storyAbortReason}`);
       break;
+    }
+  }
+
+  // ═══════ Content Policy 检测 + 自动重试 ═══════
+  // 提交后等 60 秒检测是否被内容审核拦截，拦截的允许重试 1 次
+  if (totalSubmits > 0) {
+    console.log('\n═══ Content Policy 检测 (等 60s) ═══');
+    await sleep(60000);
+
+    const policyFails = await page.evaluate(() => {
+      const fails = [];
+      const turns = document.querySelectorAll('[class*="video-record-"][class*="video-generate-chat-turn"]');
+      Array.from(turns).forEach((turn, i) => {
+        const errorTip = turn.querySelector('[class*="error-tips"], [class*="error_tip"]');
+        const text = turn.textContent || '';
+        if (errorTip || text.includes('不符合平台规则') || text.includes('违规')) {
+          const reason = errorTip?.textContent?.trim()?.replace(/反馈$/, '')?.replace(/再次生成$/, '')?.trim() || '内容审核拦截';
+          // 检查是否有"再次生成"按钮
+          const retryBtn = turn.querySelector('[class*="error-tips"] span, [class*="retry"]');
+          fails.push({ turnIndex: i, reason, hasRetryBtn: !!retryBtn });
+        }
+      });
+      return fails;
+    });
+
+    if (policyFails.length > 0) {
+      console.log(`  ⚠️ 检测到 ${policyFails.length} 个内容审核拦截:`);
+      for (const f of policyFails) {
+        console.log(`    turn ${f.turnIndex + 1}: ${f.reason}`);
+      }
+
+      // 尝试重试（点击"再次生成"按钮）— 只重试 1 次
+      const retried = await page.evaluate(() => {
+        let count = 0;
+        const turns = document.querySelectorAll('[class*="video-record-"][class*="video-generate-chat-turn"]');
+        for (const turn of turns) {
+          const errorTip = turn.querySelector('[class*="error-tips"], [class*="error_tip"]');
+          if (!errorTip) continue;
+          // 找"再次生成"按钮
+          const btns = errorTip.querySelectorAll('span, button, a, div');
+          for (const btn of btns) {
+            if (btn.textContent?.trim() === '再次生成' && btn.getBoundingClientRect().height > 0) {
+              btn.click();
+              count++;
+              break;
+            }
+          }
+        }
+        return count;
+      });
+
+      if (retried > 0) {
+        console.log(`  🔄 已点击 ${retried} 个"再次生成"按钮（自动重试 1 次）`);
+        appendAuditLog(cfg.submitAuditPath, {
+          kind: 'content_policy_retry',
+          project_id: cfg.projectId,
+          retried_count: retried,
+          reasons: policyFails.map(f => f.reason),
+        });
+      } else {
+        console.log(`  ❌ 未找到"再次生成"按钮，无法自动重试`);
+      }
+    } else {
+      console.log('  ✅ 未检测到内容审核拦截');
     }
   }
 

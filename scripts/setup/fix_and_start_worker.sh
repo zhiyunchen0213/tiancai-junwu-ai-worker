@@ -20,7 +20,7 @@ if [ ! -f ~/.production.env ]; then
   echo "WORKER_ID=$WORKER_ID" > ~/.production.env
   echo "SHARED_DIR=$HOME/production" >> ~/.production.env
   echo "REVIEW_SERVER_URL=http://107.175.215.216" >> ~/.production.env
-  echo "DISPATCHER_TOKEN=kwR2m0GMdeGZu0fSvfcVRJGvWYS255qe" >> ~/.production.env
+  echo "DISPATCHER_TOKEN=${DISPATCHER_TOKEN:?Set DISPATCHER_TOKEN}" >> ~/.production.env
   echo "AI_AGENT=claude" >> ~/.production.env
   echo "POLL_INTERVAL=30" >> ~/.production.env
   echo "3. 环境变量已创建"
