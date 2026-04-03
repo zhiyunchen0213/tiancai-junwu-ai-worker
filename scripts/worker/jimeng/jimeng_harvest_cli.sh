@@ -73,6 +73,8 @@ VIDEOS_JSON="[]"
 MAX_QUEUE_IDX=0
 MAX_QUEUE_LEN=0
 FAIL_REASONS=""
+CREDITS_CHARGED=0
+CREDITS_REFUNDED=0
 
 log "Checking $TOTAL submit_ids..."
 
@@ -131,6 +133,10 @@ if d:
         status = gs
 
 qi = d.get('queue_info', {}) if d else {}
+ci = d.get('commerce_info', {}) if d else {}
+credit_count = ci.get('credit_count', 0)
+trips = ci.get('triplets', [])
+model = trips[0].get('benefit_type', '').replace('dreamina_', '') if trips else ''
 print(json.dumps({
     'submit_id': '$submit_id',
     'status': status,
@@ -139,6 +145,8 @@ print(json.dumps({
     'video_file': video_file,
     'queue_idx': qi.get('queue_idx', 0),
     'queue_length': qi.get('queue_length', 0),
+    'credit_count': credit_count,
+    'model': model,
 }))
 " 2>/dev/null || echo '{"submit_id":"'"$submit_id"'","status":"unknown"}')
 
@@ -164,7 +172,15 @@ print(json.dumps({
     fr=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('fail_reason',''))" 2>/dev/null)
     [[ -n "$fr" ]] && FAIL_REASONS="${FAIL_REASONS}${fr}\n"
 
-    log "  $submit_id: $status"
+    # Track credits
+    cc=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('credit_count',0))" 2>/dev/null || echo 0)
+    if [[ "$status" == "success" ]]; then
+        CREDITS_CHARGED=$((CREDITS_CHARGED + cc))
+    elif [[ "$status" == "fail" ]]; then
+        CREDITS_REFUNDED=$((CREDITS_REFUNDED + cc))
+    fi
+
+    log "  $submit_id: $status (${cc}分)"
 done <<< "$SUBMIT_IDS"
 
 # --- Determine overall status ---
@@ -224,7 +240,7 @@ PYEOF
 )
 
 # --- Update submit_state.json with harvest results ---
-python3 - "$SUBMIT_STATE" "$OVERALL" "$COMPLETED" "$FAILED" << 'PYEOF'
+python3 - "$SUBMIT_STATE" "$OVERALL" "$COMPLETED" "$FAILED" "$CREDITS_CHARGED" "$CREDITS_REFUNDED" << 'PYEOF'
 import sys, json
 from datetime import datetime, timezone
 
@@ -240,7 +256,9 @@ state["harvest"] = {
     "overall": overall,
     "completed_count": completed,
     "failed_count": failed,
-    "last_checked_at": datetime.now(timezone.utc).isoformat()
+    "last_checked_at": datetime.now(timezone.utc).isoformat(),
+    "credits_charged": int(sys.argv[5]) if len(sys.argv) > 5 else 0,
+    "credits_refunded": int(sys.argv[6]) if len(sys.argv) > 6 else 0,
 }
 state["updated_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -258,6 +276,8 @@ summary = {
     'generating': $GENERATING,
     'queuing': $QUEUING,
     'failed': $FAILED,
+    'credits_charged': $CREDITS_CHARGED,
+    'credits_refunded': $CREDITS_REFUNDED,
     'videos': json.loads('$VIDEOS_JSON'),
 }
 if $MAX_QUEUE_IDX > 0:

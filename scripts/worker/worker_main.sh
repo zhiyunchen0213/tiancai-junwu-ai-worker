@@ -324,42 +324,24 @@ run_recovery_check() {
         log_info "Resuming task from phase: ${phase_progress:-unknown}"
 
         case "$phase_progress" in
-            "phase_a_complete"|"calling_brain_api"|"waiting_brain_api")
-                log_info "Resuming from Phase B"
-                run_phase_b "$(basename "$task_file")"
+            "phase_a_running"|"")
+                log_info "Resuming Phase A"
+                run_phase_a "$(basename "$task_file")"
                 ;;
-            "waiting_g1")
-                log_info "Resuming Phase B — waiting for G1 gate"
-                run_phase_b "$(basename "$task_file")"
-                ;;
-            "waiting_g2")
-                log_info "Resuming Phase B — waiting for G2 gate"
-                run_phase_b "$(basename "$task_file")"
+            "phase_a_complete"|"calling_brain_api"|"waiting_brain_api"|"waiting_g1"|"waiting_g2")
+                # Phase A 已完成，VPS 会自动驱动 Phase B/G1/G2
+                # 不再本地等待，直接释放任务文件
+                log_info "Phase A already done (progress: $phase_progress), releasing to VPS"
+                local completed_a_dir="${SHARED_DIR}/tasks/completed"
+                mkdir -p "$completed_a_dir"
+                mv "$task_file" "$completed_a_dir/$(basename "$task_file")" 2>/dev/null || true
                 ;;
             "phase_b_complete"|"phase_c_ready"|"phase_c_running")
-                # 检查重试次数，避免无限循环
-                local pc_retries
-                pc_retries=$(get_task_field "$task_file" "phase_c_retries" 2>/dev/null || echo "0")
-                pc_retries=${pc_retries:-0}
-                if (( pc_retries >= 3 )); then
-                    log_error "Phase C exceeded 3 retries, marking as failed"
-                    local fail_id
-                    fail_id=$(get_task_field "$task_file" "id")
-                    report_event "${fail_id:-$(basename "$task_file" .json)}" "task_failed" "{\"error\":\"phase_c_max_retries\"}"
-                    mv "$task_file" "${SHARED_DIR}/tasks/failed/$(basename "$task_file")" 2>/dev/null
-                else
-                    update_task_json "$task_file" "phase_c_retries" "$((pc_retries + 1))" || true
-                    log_info "Resuming from Phase C (attempt $((pc_retries + 1))/3)"
-                    local resume_task_id
-                    resume_task_id=$(get_task_field "$task_file" "id")
-                    local resume_work_dir
-                    resume_work_dir=$(get_task_field "$task_file" "work_dir")
-                    if [[ -n "$resume_work_dir" ]] && [[ ! -f "$resume_work_dir/phase_b/即梦提示词.md" ]]; then
-                        log_info "Prompts missing, downloading from server..."
-                        download_prompts_from_server "${resume_task_id:-$(basename "$task_file" .json)}" "$resume_work_dir"
-                    fi
-                    run_phase_c "$(basename "$task_file")"
-                fi
+                # Phase C ready — 通过 poll-phase-c 认领，不在 recovery 里跑
+                log_info "Phase C ready (progress: $phase_progress), will be claimed via poll-phase-c"
+                local completed_a_dir="${SHARED_DIR}/tasks/completed"
+                mkdir -p "$completed_a_dir"
+                mv "$task_file" "$completed_a_dir/$(basename "$task_file")" 2>/dev/null || true
                 ;;
             "phase_c_complete")
                 log_info "Resuming harvesting"
@@ -1324,89 +1306,48 @@ process_task() {
         return 1
     fi
 
-    # 执行各个阶段 (Execute phases in sequence)
-    # Exit codes: 0=success, 1=system error (retryable), 2=human rejected (terminal)
-    local phase_exit=0
+    # ── 只执行 Phase A，完成后释放 worker ──
+    # Phase B (评分+审核) 由 VPS 自动驱动，不阻塞 worker
+    # Phase C (即梦提交) 通过 poll-phase-c 由空闲 worker 认领
+    # 这样每台 Mac Mini 不再被审核等待锁死，可连续处理多个 Phase A
 
     run_phase_a "$task_file"
-    phase_exit=$?
-
-    if [[ $phase_exit -eq 0 ]]; then
-        run_phase_b "$task_file"
-        phase_exit=$?
-    fi
-
-    if [[ $phase_exit -eq 0 ]]; then
-        run_phase_c "$task_file"
-        phase_exit=$?
-    fi
-
-    # 处理失败情况 (Handle failures)
-    if [[ $phase_exit -ne 0 ]]; then
-        # 人工拒绝 (exit code 2) — 终止任务，不重试
-        if [[ $phase_exit -eq 2 ]]; then
-            log_warn "Task rejected by reviewer — moving to failed (no retry)"
-            update_task_json "$task_path" "status" "rejected" || true
-            local failed_path="${SHARED_DIR}/tasks/failed/${task_file}"
-            mv "$task_path" "$failed_path" 2>/dev/null || true
-            report_event "$task_id" "task_failed" "{\"error\":\"rejected_by_reviewer\"}"
-            return 1
-        fi
-
-        # 系统错误 — 可重试
-        local retry_count
-        retry_count=$(get_task_field "$task_path" "retry_count")
-        retry_count=${retry_count:-0}
-        retry_count=$((retry_count + 1))
-
-        if ! update_task_json "$task_path" "retry_count" "$retry_count"; then
-            log_error "Failed to update retry count"
-        fi
-
-        if [[ $retry_count -lt $MAX_RETRIES ]]; then
-            # 保留 phase_progress，Phase C 失败时下次直接从 C 重试（不回到 Phase A）
-            local current_phase
-            current_phase=$(get_task_field "$task_path" "phase_progress")
-            if [[ "$current_phase" == "phase_c_running" ]] || [[ "$current_phase" == "phase_c_ready" ]]; then
-                log_warn "Task failed at Phase C (attempt $retry_count/$MAX_RETRIES), re-queuing for Phase C retry..."
-                update_task_json "$task_path" "phase_progress" "phase_c_ready" || true
-            else
-                log_warn "Task failed (attempt $retry_count/$MAX_RETRIES), re-queuing to pending..."
-                update_task_json "$task_path" "phase" "null" || true
-            fi
-            update_task_json "$task_path" "status" "pending" || true
-            update_task_json "$task_path" "claimed_by" "null" || true
-            update_task_json "$task_path" "claimed_at" "null" || true
-            local requeue_path="${SHARED_DIR}/tasks/pending/${task_file}"
-            if mv "$task_path" "$requeue_path" 2>/dev/null; then
-                log_info "Task re-queued successfully: ${task_file}"
-            else
-                log_error "Failed to re-queue task, leaving in running/"
-            fi
-            return 1
-        else
-            log_error "Task exceeded max retries, moving to failed directory"
-            local failed_path="${SHARED_DIR}/tasks/failed/${task_file}"
-            if mv "$task_path" "$failed_path"; then
-                send_alert "TASK_FAILED" "Task exceeded max retries: ${task_file}" "$task_file"
-                report_event "$task_id" "task_failed" "{\"error\":\"max_retries_exceeded\",\"retry_count\":$retry_count}"
-            fi
-            [[ -n "$heartbeat_pid" ]] && kill "$heartbeat_pid" 2>/dev/null
-            return 1
-        fi
-    fi
+    local phase_exit=$?
 
     # 停止后台心跳
     [[ -n "$heartbeat_pid" ]] && kill "$heartbeat_pid" 2>/dev/null && wait "$heartbeat_pid" 2>/dev/null
 
-    # 成功：将任务移至收割队列 (Success: finalize and move to harvesting)
-    if finalize_task "$task_file"; then
-        log_info "Task successfully finalized: ${task_file}"
-        return 0
-    else
-        log_error "Failed to finalize task: ${task_file}"
+    if [[ $phase_exit -ne 0 ]]; then
+        # Phase A 失败 — 可重试
+        local retry_count
+        retry_count=$(get_task_field "$task_path" "retry_count")
+        retry_count=${retry_count:-0}
+        retry_count=$((retry_count + 1))
+        update_task_json "$task_path" "retry_count" "$retry_count" || true
+
+        if [[ $retry_count -lt $MAX_RETRIES ]]; then
+            log_warn "Phase A failed (attempt $retry_count/$MAX_RETRIES), re-queuing..."
+            update_task_json "$task_path" "status" "pending" || true
+            update_task_json "$task_path" "phase" "null" || true
+            update_task_json "$task_path" "claimed_by" "null" || true
+            local requeue_path="${SHARED_DIR}/tasks/pending/${task_file}"
+            mv "$task_path" "$requeue_path" 2>/dev/null || true
+        else
+            log_error "Phase A exceeded max retries, moving to failed"
+            local failed_path="${SHARED_DIR}/tasks/failed/${task_file}"
+            mv "$task_path" "$failed_path" 2>/dev/null || true
+            report_event "$task_id" "task_failed" "{\"error\":\"phase_a_max_retries\",\"retry_count\":$retry_count}"
+        fi
         return 1
     fi
+
+    # Phase A 成功 — VPS 已收到 phase_a_complete，会自动驱动 Phase B
+    # 清理本地任务文件（worker 不再持有此任务）
+    log_info "Phase A complete, releasing worker (VPS handles Phase B → G1 → G2 → Phase C dispatch)"
+    local completed_a_dir="${SHARED_DIR}/tasks/completed"
+    mkdir -p "$completed_a_dir"
+    mv "$task_path" "$completed_a_dir/${task_file}" 2>/dev/null || true
+    return 0
 }
 
 # ============================================================================
@@ -1569,32 +1510,47 @@ print(ok)
             if [[ "$dl_count" -gt 0 ]]; then
                 log_info "[Harvest] $task_id: 下载了 $dl_count 个视频"
 
-                # ── 先同步到 macking，再上报 harvest_complete ──
-                # 防止 DB 注册了 media_path 但文件从未送达 macking
+                # ── 上传视频到 VPS（主路径，通过已有 SSH 隧道 HTTP） ──
+                local upload_ok=true
+                log_info "[Harvest] $task_id: 上传视频到 VPS..."
+                for vf in "$video_dir"/*.mp4; do
+                    [[ -f "$vf" ]] || continue
+                    local vfn=$(basename "$vf")
+                    local vsize=$(stat -f%z "$vf" 2>/dev/null || stat -c%s "$vf" 2>/dev/null || echo 0)
+                    if [[ "$vsize" -le 10000 ]]; then continue; fi
+                    local upload_url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/upload-video?filename=${vfn}"
+                    local http_code
+                    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+                        -X POST \
+                        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+                        -H "Content-Type: application/octet-stream" \
+                        --data-binary "@${vf}" \
+                        --max-time 120 \
+                        "$upload_url" 2>/dev/null)
+                    if [[ "$http_code" == "200" ]]; then
+                        log_info "[Harvest] $task_id: 已上传 $vfn ($((vsize/1048576))MB)"
+                    else
+                        log_warn "[Harvest] $task_id: 上传 $vfn 失败 (HTTP $http_code)"
+                        upload_ok=false
+                    fi
+                done
+                if $upload_ok; then
+                    log_info "[Harvest] $task_id: 全部视频已上传到 VPS"
+                else
+                    log_warn "[Harvest] $task_id: 部分视频上传失败，预览可能不完整"
+                fi
+
+                # ── 后台同步到 macking（剪辑团队用，非关键路径） ──
                 local macking_delivery="/Users/zjw-mini/production/deliveries/${task_id}"
-                local rsync_ok=false
-                log_info "[Harvest] $task_id: 同步到 macking..."
-                for rsync_attempt in 1 2 3; do
-                    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+                (
+                    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
                         zjw-mini@192.168.31.222 \
                         "mkdir -p '$macking_delivery/videos' '$macking_delivery/参考图'" 2>/dev/null \
                     && rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
-                        "$video_dir/" zjw-mini@192.168.31.222:"$macking_delivery/videos/"; then
-                        rsync_ok=true
-                        log_info "[Harvest] $task_id: 视频已同步到 macking (attempt $rsync_attempt)"
-                        break
-                    else
-                        log_warn "[Harvest] $task_id: rsync 失败 (attempt $rsync_attempt/3)"
-                        sleep 3
-                    fi
-                done
-                if ! $rsync_ok; then
-                    log_error "[Harvest] $task_id: rsync 到 macking 全部失败！视频可能无法预览"
-                    report_progress "$task_id" "Harvest: rsync失败" "视频文件未同步到 macking，预览可能不可用"
-                fi
-
-                # 同步参考图/提示词/原视频（非关键，失败不阻塞）
-                (
+                        "$video_dir/" zjw-mini@192.168.31.222:"$macking_delivery/videos/" 2>/dev/null \
+                    && log_info "[Harvest] $task_id: 视频已同步到 macking" \
+                    || log_warn "[Harvest] $task_id: macking 同步失败（不影响预览）"
+                    # 同步参考图/提示词/原视频
                     [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" zjw-mini@192.168.31.222:"$macking_delivery/参考图/" 2>/dev/null
                     [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
                     [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
@@ -1602,7 +1558,7 @@ print(ok)
                     report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
                 ) &
 
-                # ── 然后上报 harvest_complete ──
+                # ── 上报 harvest_complete ──
                 TASK_ID="$task_id" VIDEO_DIR="$video_dir" HARVEST_RAW="$raw" \
                 REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
                 python3 << 'HARVEST_PYEOF'
@@ -1659,12 +1615,59 @@ for v in videos:
         entry["model"] = sid_map[sid]["model"]
     video_list.append(entry)
 
+# 从 harvest summary 读取积分数据 + 失败任务
+credits_charged = 0
+credits_refunded = 0
+failed_submissions = []
+try:
+    harvest_data_parsed = json.loads(os.environ.get("HARVEST_RAW", "{}"))
+    harvest_info = state.get("harvest", {}) if 'state' in dir() else {}
+    credits_charged = harvest_info.get("credits_charged", 0)
+    credits_refunded = harvest_info.get("credits_refunded", 0)
+except: pass
+
+# 收集失败的 submit_id（有 sid_map 映射的才能知道批次号）
+all_submit_ids = set(sid_map.keys())
+success_sids = set()
+for v in video_list:
+    fn = v.get("filename", "")
+    sid = fn.split("_video_")[0] if "_video_" in fn else ""
+    if sid: success_sids.add(sid)
+
+for sid in all_submit_ids - success_sids:
+    info = sid_map.get(sid, {})
+    # 从 harvest raw data 找 fail_reason
+    fail_reason = ""
+    try:
+        for fr_line in (harvest_data_parsed.get("fail_reasons", []) or []):
+            if fr_line: fail_reason = fr_line; break
+    except: pass
+    # 从 submit_state 读取更精确的状态
+    try:
+        for bkey, models in state.get("batches", {}).items():
+            for mname, minfo in models.items():
+                if minfo.get("submit_id") == sid:
+                    fail_reason = fail_reason or minfo.get("fail_reason", "")
+    except: pass
+    failed_submissions.append({
+        "submit_id": sid,
+        "batch_num": info.get("batch_num", 0),
+        "model": info.get("model", ""),
+        "fail_reason": fail_reason or "generation failed or cancelled",
+    })
+
+if failed_submissions:
+    print(f"[Harvest] {len(failed_submissions)} failed submissions: {[f['submit_id'][:8] for f in failed_submissions]}")
+
 body = json.dumps({
     "task_id": task_id,
     "event": "harvest_complete",
     "payload": {
         "video_count": len(video_list),
         "videos": video_list,
+        "failed_submissions": failed_submissions,
+        "credits_charged": credits_charged,
+        "credits_refunded": credits_refunded,
     }
 }).encode("utf-8")
 
