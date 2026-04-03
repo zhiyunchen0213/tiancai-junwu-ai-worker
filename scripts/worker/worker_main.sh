@@ -1569,7 +1569,40 @@ print(ok)
             if [[ "$dl_count" -gt 0 ]]; then
                 log_info "[Harvest] $task_id: 下载了 $dl_count 个视频"
 
-                # 上传视频信息到 VPS（注册为 asset，含 CDN URL 用于预览）
+                # ── 先同步到 macking，再上报 harvest_complete ──
+                # 防止 DB 注册了 media_path 但文件从未送达 macking
+                local macking_delivery="/Users/zjw-mini/production/deliveries/${task_id}"
+                local rsync_ok=false
+                log_info "[Harvest] $task_id: 同步到 macking..."
+                for rsync_attempt in 1 2 3; do
+                    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+                        zjw-mini@192.168.31.222 \
+                        "mkdir -p '$macking_delivery/videos' '$macking_delivery/参考图'" 2>/dev/null \
+                    && rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
+                        "$video_dir/" zjw-mini@192.168.31.222:"$macking_delivery/videos/"; then
+                        rsync_ok=true
+                        log_info "[Harvest] $task_id: 视频已同步到 macking (attempt $rsync_attempt)"
+                        break
+                    else
+                        log_warn "[Harvest] $task_id: rsync 失败 (attempt $rsync_attempt/3)"
+                        sleep 3
+                    fi
+                done
+                if ! $rsync_ok; then
+                    log_error "[Harvest] $task_id: rsync 到 macking 全部失败！视频可能无法预览"
+                    report_progress "$task_id" "Harvest: rsync失败" "视频文件未同步到 macking，预览可能不可用"
+                fi
+
+                # 同步参考图/提示词/原视频（非关键，失败不阻塞）
+                (
+                    [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" zjw-mini@192.168.31.222:"$macking_delivery/参考图/" 2>/dev/null
+                    [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
+                    [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
+                    [[ -f "$work_dir/original.mp4" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/original.mp4" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
+                    report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
+                ) &
+
+                # ── 然后上报 harvest_complete ──
                 TASK_ID="$task_id" VIDEO_DIR="$video_dir" HARVEST_RAW="$raw" \
                 REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
                 python3 << 'HARVEST_PYEOF'
@@ -1649,27 +1682,8 @@ for attempt in range(3):
         else: print(f"[Harvest] report failed: {e}")
 HARVEST_PYEOF
 
-                # 同步剪辑包到 macking（局域网 rsync，剪辑人员从 macking 取用）
-                local macking_delivery="/Users/zjw-mini/production/deliveries/${task_id}"
-                log_info "[Harvest] $task_id: 同步到 macking..."
-                (
-                    # 创建目录 + 同步视频
-                    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no zjw-mini@192.168.31.222 \
-                        "mkdir -p '$macking_delivery/videos' '$macking_delivery/参考图'" 2>/dev/null
-                    rsync -az -e "ssh -o StrictHostKeyChecking=no" "$video_dir/" zjw-mini@192.168.31.222:"$macking_delivery/videos/" 2>/dev/null
-                    # 同步参考图和提示词
-                    [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" zjw-mini@192.168.31.222:"$macking_delivery/参考图/" 2>/dev/null
-                    [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    # 同步原视频（剪辑需要对照原片）
-                    [[ -f "$work_dir/original.mp4" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/original.mp4" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    log_info "[Harvest] $task_id: 已同步到 macking ($macking_delivery)"
-                    report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词+原视频已同步到 macking"
-                ) &
-                local rsync_pid=$!
-
-                # 等 rsync 完成再移动目录（防止 rsync 读取已移动的路径）
-                wait "$rsync_pid" 2>/dev/null
+                # 等后台同步参考图完成后再移动目录
+                wait 2>/dev/null
 
                 # 移到 completed
                 local completed_dir="${SHARED_DIR}/tasks/completed"
