@@ -56,6 +56,15 @@ if [[ "$BEFORE" != "$AFTER" ]]; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Updating: $(git log --oneline $BEFORE..$AFTER | wc -l | tr -d ' ') new commits"
     git reset --hard origin/main --quiet 2>/dev/null
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Updated to: $(git log --oneline -1)"
+
+    # 检查 worker 脚本是否有变更 — 如果有，自动重启 worker 进程
+    # LaunchAgent KeepAlive 会自动用新代码拉起新进程
+    # 断点续跑由 startup recovery 保障（Phase A 重跑，Phase C/Harvest 释放给 VPS）
+    CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" -- scripts/worker/ 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$CHANGED" -gt 0 ]]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Worker scripts changed ($CHANGED files) — restarting worker"
+        pkill -f worker_main.sh 2>/dev/null || true
+    fi
 fi
 SCRIPT
 chmod +x "$UPDATE_SCRIPT"
