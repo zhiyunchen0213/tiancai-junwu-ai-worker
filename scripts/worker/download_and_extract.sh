@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 下载并提取视频脚本 - Phase A, Step 1
-# 功能: 从YouTube下载视频, 提取关键帧和音频, 获取元数据
+# 功能: 通过 yt-dlp 下载视频 (支持 YouTube/B站/TikTok/抖音/Facebook 等), 提取关键帧和音频, 获取元数据
 # 依赖: yt-dlp, ffmpeg, ffprobe
 
 set -euo pipefail
@@ -20,8 +20,8 @@ NC='\033[0m' # No Color
 # 检查参数
 if [[ $# -lt 2 ]]; then
     echo -e "${RED}错误: 缺少必需参数${NC}"
-    echo "用法: $0 <YouTube_URL> <工作目录>"
-    echo "示例: $0 'https://www.youtube.com/watch?v=...' '/tmp/video_work'"
+    echo "用法: $0 <视频URL> <工作目录>"
+    echo "示例: $0 'https://www.youtube.com/shorts/...' '/tmp/video_work'"
     exit 1
 fi
 
@@ -50,50 +50,56 @@ DOWNLOAD_SUCCESS=0
 while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     echo "下载尝试 $ATTEMPT/$MAX_ATTEMPTS..."
 
-    # YouTube 反爬需要登录态 cookies
-    # 优先级: YT_COOKIES_FILE > Safari binary cookies (cp + convert) > --cookies-from-browser
-    YT_COOKIE_ARGS=()
-    if [[ -n "${YT_COOKIES_FILE:-}" ]] && [[ -f "$YT_COOKIES_FILE" ]]; then
-        YT_COOKIE_ARGS=(--cookies "$YT_COOKIES_FILE")
-    elif [[ "${YT_COOKIES_BROWSER:-}" == "safari" ]]; then
-        # Safari cookie 由 macking 中控机每 5 分钟推送到 /tmp/safari-cookies-macking.bin
-        # 优先用 macking 的共享 cookie（统一维护），fallback 到本机 cookie
-        SAFARI_BIN="/tmp/safari-cookies-macking.bin"
-        [[ ! -f "$SAFARI_BIN" ]] && SAFARI_BIN="/tmp/safari-cookies-$USER.bin"
-        COOKIES_TXT="/tmp/yt-cookies-$USER.txt"
-        if [[ -f "$SAFARI_BIN" ]]; then
-            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-            if python3 "$SCRIPT_DIR/safari_cookies_export.py" "$SAFARI_BIN" "$COOKIES_TXT" 2>/dev/null; then
-                YT_COOKIE_ARGS=(--cookies "$COOKIES_TXT")
-            else
-                echo "警告: Safari cookie 转换失败" >&2
-                YT_COOKIE_ARGS=(--cookies-from-browser safari)
+    # YouTube 下载策略：
+    # 1. 优先 SSH 到 macking 下载（macking 有 Safari YouTube 登录态，不会被轮换）
+    # 2. Fallback 到本机 Safari（如果 worker 本机有 YouTube 登录）
+    MACKING_HOST="${MACKING_HOST:-192.168.31.222}"
+    MACKING_USER="${MACKING_USER:-zjw-mini}"
+    DOWNLOAD_DONE=0
+
+    # 方案 1: macking 代理下载
+    echo "[DEBUG] Testing SSH to macking: $MACKING_USER@$MACKING_HOST"
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" true 2>&1; then
+        echo "通过 macking ($MACKING_HOST) 代理下载..."
+        REMOTE_DIR="/tmp/yt-dl-$$-${RANDOM}"
+        # 在 macking 上下载到临时目录，merge 为 mp4
+        if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" \
+            "export PATH=/opt/homebrew/bin:\$PATH; mkdir -p $REMOTE_DIR && yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o '$REMOTE_DIR/video.%(ext)s' '$URL' && ls $REMOTE_DIR/*.mp4" \
+            2>"$WORK_DIR/download.log"; then
+            # 找到下载的 mp4 文件，scp 回本机
+            REMOTE_FILE=$(ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "ls $REMOTE_DIR/*.mp4 2>/dev/null | head -1")
+            if [[ -n "$REMOTE_FILE" ]]; then
+                if scp -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST:$REMOTE_FILE" "$WORK_DIR/original.mp4" 2>/dev/null; then
+                    ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
+                    DOWNLOAD_DONE=1
+                    DOWNLOAD_SUCCESS=1
+                    echo -e "${GREEN}✓ 视频下载成功（macking 代理）${NC}"
+                    break
+                fi
             fi
-        else
-            echo "警告: Safari cookie 文件未找到 ($SAFARI_BIN)，cookie-sync LaunchAgent 可能未运行" >&2
-            YT_COOKIE_ARGS=(--cookies-from-browser safari)
         fi
-    elif [[ -n "${YT_COOKIES_BROWSER:-}" ]]; then
-        YT_COOKIE_ARGS=(--cookies-from-browser "${YT_COOKIES_BROWSER}")
+        ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
+        echo "macking 代理下载失败，尝试本机..."
     fi
-    if yt-dlp "${YT_COOKIE_ARGS[@]}" --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
-        DOWNLOAD_SUCCESS=1
-        echo -e "${GREEN}✓ 视频下载成功${NC}"
-        break
-    else
-        DOWNLOAD_ERROR=$(cat "$WORK_DIR/download.log" 2>/dev/null || echo "未知错误")
 
-        # 检查是否为终端错误 (无需重试)
-        if echo "$DOWNLOAD_ERROR" | grep -qE "(地理限制|年龄限制|不可用|私密|已删除)"; then
-            echo -e "${RED}✗ 终端错误: $DOWNLOAD_ERROR${NC}"
-            exit 1
+    # 方案 2: 本机直接下载（fallback）
+    if [[ $DOWNLOAD_DONE -eq 0 ]]; then
+        if yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
+            DOWNLOAD_SUCCESS=1
+            echo -e "${GREEN}✓ 视频下载成功（本机）${NC}"
+            break
         fi
+    fi
 
-        if [[ $ATTEMPT -lt $MAX_ATTEMPTS ]]; then
-            WAIT=$((5 * ATTEMPT))
-            echo "等待 $WAIT 秒后重试..."
-            sleep $WAIT
-        fi
+    DOWNLOAD_ERROR=$(cat "$WORK_DIR/download.log" 2>/dev/null || echo "未知错误")
+    if echo "$DOWNLOAD_ERROR" | grep -qE "(地理限制|年龄限制|不可用|私密|已删除)"; then
+        echo -e "${RED}✗ 终端错误: $DOWNLOAD_ERROR${NC}"
+        exit 1
+    fi
+    if [[ $ATTEMPT -lt $MAX_ATTEMPTS ]]; then
+        WAIT=$((5 * ATTEMPT))
+        echo "等待 $WAIT 秒后重试..."
+        sleep $WAIT
     fi
 
     ((ATTEMPT++))

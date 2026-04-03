@@ -70,6 +70,9 @@ GENERATING=0
 QUEUING=0
 FAILED=0
 VIDEOS_JSON="[]"
+MAX_QUEUE_IDX=0
+MAX_QUEUE_LEN=0
+FAIL_REASONS=""
 
 log "Checking $TOTAL submit_ids..."
 
@@ -127,12 +130,15 @@ if d:
     elif gs:
         status = gs
 
+qi = d.get('queue_info', {}) if d else {}
 print(json.dumps({
     'submit_id': '$submit_id',
     'status': status,
     'fail_reason': fail_reason,
     'video_url': video_url,
-    'video_file': video_file
+    'video_file': video_file,
+    'queue_idx': qi.get('queue_idx', 0),
+    'queue_length': qi.get('queue_length', 0),
 }))
 " 2>/dev/null || echo '{"submit_id":"'"$submit_id"'","status":"unknown"}')
 
@@ -147,6 +153,16 @@ print(json.dumps({
         generating|running) GENERATING=$((GENERATING + 1)) ;;
         *)          QUEUING=$((QUEUING + 1)) ;;  # unknown → treat as still pending
     esac
+
+    # Track max queue position
+    qi=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queue_idx',0))" 2>/dev/null || echo 0)
+    ql=$(echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('queue_length',0))" 2>/dev/null || echo 0)
+    [[ "$qi" -gt "${MAX_QUEUE_IDX:-0}" ]] 2>/dev/null && MAX_QUEUE_IDX=$qi
+    [[ "$ql" -gt "${MAX_QUEUE_LEN:-0}" ]] 2>/dev/null && MAX_QUEUE_LEN=$ql
+
+    # Track fail reasons
+    fr=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('fail_reason',''))" 2>/dev/null)
+    [[ -n "$fr" ]] && FAIL_REASONS="${FAIL_REASONS}${fr}\n"
 
     log "  $submit_id: $status"
 done <<< "$SUBMIT_IDS"
@@ -232,30 +248,25 @@ with open(state_path, 'w') as f:
     json.dump(state, f, indent=2, ensure_ascii=False)
 PYEOF
 
-# --- Output JSON summary (always, for --check-only consumption) ---
-python3 - "$OVERALL" "$TOTAL" "$COMPLETED" "$GENERATING" "$QUEUING" "$FAILED" "$VIDEOS_JSON" << 'PYEOF'
-import sys, json
-
-overall = sys.argv[1]
-total = int(sys.argv[2])
-completed = int(sys.argv[3])
-generating = int(sys.argv[4])
-queuing = int(sys.argv[5])
-failed = int(sys.argv[6])
-videos = json.loads(sys.argv[7])
-
+# --- Output JSON summary ---
+python3 -c "
+import json
 summary = {
-    "overall": overall,
-    "total": total,
-    "completed": completed,
-    "generating": generating,
-    "queuing": queuing,
-    "failed": failed,
-    "videos": videos
+    'overall': '$OVERALL',
+    'total': $TOTAL,
+    'completed': $COMPLETED,
+    'generating': $GENERATING,
+    'queuing': $QUEUING,
+    'failed': $FAILED,
+    'videos': json.loads('$VIDEOS_JSON'),
 }
-
+if $MAX_QUEUE_IDX > 0:
+    summary['queue_info'] = {'queue_idx': $MAX_QUEUE_IDX, 'queue_length': $MAX_QUEUE_LEN}
+fail_reasons = '''$FAIL_REASONS'''.strip()
+if fail_reasons:
+    summary['fail_reasons'] = [r for r in fail_reasons.split('\n') if r.strip()]
 print(json.dumps(summary, ensure_ascii=False))
-PYEOF
+"
 
 log "Status: $OVERALL ($COMPLETED/$TOTAL complete, $FAILED failed)"
 exit 0

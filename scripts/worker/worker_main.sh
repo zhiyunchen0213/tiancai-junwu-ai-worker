@@ -169,8 +169,7 @@ PYEOF
 
 report_event() {
     # 用法: report_event <task_id> <event> [payload_json]
-    # 安全版：payload 通过临时文件传递，避免 shell 特殊字符问题
-    # 如果未配置 REVIEW_SERVER_URL 则静默跳过
+    # 使用临时文件 + printf 保持 JSON 完整性（echo 会破坏引号）
     [[ -z "$REVIEW_SERVER_URL" ]] && return 0
     [[ -z "$DISPATCHER_TOKEN" ]] && return 0
 
@@ -178,48 +177,35 @@ report_event() {
     local event="$2"
     local payload="${3:-{}}"
 
-    # 后台异步上报，不阻塞主流程。失败静默，绝不影响任务。
     (
-        local tmp="/tmp/report_$$_${RANDOM}.json"
-        echo "$payload" > "$tmp" 2>/dev/null || echo '{}' > "$tmp"
-        TASK_ID="$task_id" EVENT="$event" PAYLOAD_FILE="$tmp" \
-        REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \
-        python3 << 'PYEOF'
-import json, os, urllib.request, time
+        # 写 payload 到临时文件（printf 保留 JSON 原文，避免 echo 破坏引号）
+        _tmp="/tmp/report_$$_${RANDOM}.json"
+        printf '%s' "$payload" > "$_tmp" 2>/dev/null || printf '{}' > "$_tmp"
 
-url = os.environ["REVIEW_URL"].rstrip("/") + "/api/v1/tasks/report"
+        # 用 Python 安全构建 body（处理嵌套 JSON 转义）
+        _body=$(python3 -c "
+import json
 try:
-    with open(os.environ["PAYLOAD_FILE"]) as f:
-        payload = json.loads(f.read())
-except:
-    payload = {}
+    with open('$_tmp') as f: p = json.loads(f.read())
+except: p = {}
+print(json.dumps({'task_id':'$task_id','event':'$event','payload':p}))
+" 2>/dev/null)
+        rm -f "$_tmp"
 
-body = json.dumps({
-    "task_id": os.environ["TASK_ID"],
-    "event": os.environ["EVENT"],
-    "payload": payload
-}).encode("utf-8")
+        [ -z "$_body" ] && _body="{\"task_id\":\"$task_id\",\"event\":\"$event\",\"payload\":{}}"
 
-req = urllib.request.Request(url, data=body, headers={
-    "Content-Type": "application/json",
-    "Authorization": f"Bearer {os.environ['DTOK']}"
-})
-max_attempts = 5
-for attempt in range(max_attempts):
-    try:
-        urllib.request.urlopen(req, timeout=30)
-        print(f"[report] {os.environ['EVENT']} OK (attempt {attempt+1})", flush=True)
-        break
-    except Exception as e:
-        if attempt < max_attempts - 1:
-            delay = 10 * (2 ** attempt)  # 10, 20, 40, 80s
-            print(f"[report] {os.environ['EVENT']} attempt {attempt+1} failed: {e}, retrying in {delay}s", flush=True)
-            time.sleep(delay)
-        else:
-            print(f"[report] {os.environ['EVENT']} failed after {max_attempts} attempts: {e}", flush=True)
-
-os.remove(os.environ["PAYLOAD_FILE"])
-PYEOF
+        for _i in 1 2 3 4 5; do
+            if curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+                -d "$_body" --connect-timeout 10 --max-time 30 > /dev/null 2>&1; then
+                echo "[report] $event OK (attempt $_i)"
+                break
+            fi
+            _delay=$((_i * 10))
+            echo "[report] $event attempt $_i failed, retrying in ${_delay}s"
+            sleep "$_delay"
+        done
     ) &
 }
 
@@ -229,15 +215,11 @@ report_progress() {
     [[ -z "$REVIEW_SERVER_URL" ]] && return 0
     [[ -z "$DISPATCHER_TOKEN" ]] && return 0
     local task_id="$1" step="$2" detail="${3:-}"
-    (STEP="$step" DETAIL="$detail" python3 -c "
-import os, json, urllib.request
-body = json.dumps({'step': os.environ['STEP'], 'detail': os.environ.get('DETAIL','')}).encode()
-req = urllib.request.Request(
-    os.environ['REVIEW_SERVER_URL'].rstrip('/') + '/api/v1/tasks/' + os.environ['TASK_ID'] + '/progress',
-    data=body, headers={'Content-Type':'application/json','Authorization':'Bearer '+os.environ['DTOK']})
-try: urllib.request.urlopen(req, timeout=15)
-except: pass
-" TASK_ID="$task_id" REVIEW_SERVER_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" 2>/dev/null) &
+    (curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/progress" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+        -d "{\"step\":\"${step}\",\"detail\":\"${detail}\"}" \
+        --connect-timeout 5 --max-time 15 > /dev/null 2>&1) &
 }
 
 # 安全版 report：直接从文件读取数据构建 payload（用于大文本上报）
@@ -421,7 +403,7 @@ run_phase_a() {
     update_task_json "$task_path" "phase" "phase_a" || true
     update_task_json "$task_path" "phase_progress" "phase_a_running" || true
 
-    local scripts_dir="${SHARED_DIR}/code/scripts/worker"
+    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
     # Step 1: 下载视频（只下载，不提取帧/音频 — Kimi 可以直接分析视频）
     log_info "Phase A Step 1/2: download_and_extract.sh"
@@ -934,7 +916,7 @@ run_phase_c() {
     local task_id
     task_id=$(get_task_field "$task_path" "id")
     task_id="${task_id:-$(basename "$task_file" .json)}"
-    local scripts_dir="${SHARED_DIR}/code/scripts/worker"
+    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
     log_info "Starting Phase C for ${task_file} (task_id: ${task_id})"
     update_task_json "$task_path" "phase" "phase_c" || true
@@ -1017,31 +999,46 @@ for c in data.get('costume', []):
 
             local synced=false
             if [[ -n "$costume_fn" ]]; then
-                # URL encode 中文文件名
                 local encoded_fn
                 encoded_fn=$(python3 -c "from urllib.parse import quote; print(quote('${costume_fn}'))" 2>/dev/null || echo "$costume_fn")
-                local encoded_char
-                encoded_char=$(python3 -c "from urllib.parse import quote; print(quote('${char_name}'))" 2>/dev/null || echo "$char_name")
-                local costume_url="${vps_url}/ip-images/${ip_dir_upper}/${encoded_char}/${encoded_fn}"
-                curl -sf -o "$local_path" "$costume_url" 2>/dev/null && \
-                    { log_info "  Downloaded costume from VPS: $char_name/$costume_fn"; synced=true; }
+
+                local tmp_dl="${local_path}.tmp"
+                if [[ "$is_per_story" == "true" ]]; then
+                    # per-story: 角色参考图在 /ref-images/{taskId}/
+                    local encoded_tid
+                    encoded_tid=$(python3 -c "from urllib.parse import quote; print(quote('${task_id}'))" 2>/dev/null || echo "$task_id")
+                    local costume_url="${vps_url}/ref-images/${encoded_tid}/${encoded_fn}"
+                    curl -sf -o "$tmp_dl" "$costume_url" 2>/dev/null && [[ -s "$tmp_dl" ]] && mv "$tmp_dl" "$local_path" && \
+                        { log_info "  Downloaded per-story costume from VPS: $task_id/$costume_fn"; synced=true; }
+                else
+                    # 固定 IP: 角色参考图在 /ip-images/{GROUP}/{CharName}/
+                    local encoded_char
+                    encoded_char=$(python3 -c "from urllib.parse import quote; print(quote('${char_name}'))" 2>/dev/null || echo "$char_name")
+                    local costume_url="${vps_url}/ip-images/${ip_dir_upper}/${encoded_char}/${encoded_fn}"
+                    curl -sf -o "$tmp_dl" "$costume_url" 2>/dev/null && [[ -s "$tmp_dl" ]] && mv "$tmp_dl" "$local_path" && \
+                        { log_info "  Downloaded costume from VPS: $char_name/$costume_fn"; synced=true; }
+                fi
             fi
 
-            # 2. 降级：从 VPS 下载 Default.jpeg
-            if [[ "$synced" != "true" ]]; then
+            # 2. 降级：从 VPS 下载 Default.jpeg（仅固定 IP 模式）
+            if [[ "$synced" != "true" ]] && [[ "$is_per_story" != "true" ]]; then
                 local encoded_char_default
                 encoded_char_default=$(python3 -c "from urllib.parse import quote; print(quote('${char_name}'))" 2>/dev/null || echo "$char_name")
                 local default_url="${vps_url}/ip-images/${ip_dir_upper}/${encoded_char_default}/Default.jpeg"
-                curl -sf -o "$local_path" "$default_url" 2>/dev/null && \
+                curl -sf -o "$tmp_dl" "$default_url" 2>/dev/null && [[ -s "$tmp_dl" ]] && mv "$tmp_dl" "$local_path" && \
                     { log_info "  Downloaded default from VPS: $ref_file"; synced=true; }
             fi
 
-            # 3. 最后降级：从 macking SCP
-            if [[ "$synced" != "true" ]] && [[ -n "${MACKING_HOST:-}" ]]; then
+            # 3. 最后降级：从 macking SCP（仅固定 IP 模式）
+            if [[ "$synced" != "true" ]] && [[ "$is_per_story" != "true" ]] && [[ -n "${MACKING_HOST:-}" ]]; then
                 local default_remote="${MACKING_USER:-zjw-mini}@${MACKING_HOST}:~/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
                 scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$default_remote" "$local_path" 2>/dev/null && \
                     log_info "  Synced from macking: $ref_file" || \
                     log_warn "  Failed to sync: $ref_file"
+            fi
+
+            if [[ "$synced" != "true" ]]; then
+                log_warn "  MISSING ref: $ref_file — character consistency will be affected"
             fi
         done
 
@@ -1189,7 +1186,16 @@ except:
 
         if update_task_json "$task_path" "phase_progress" "phase_c_complete"; then
             log_info "Phase C completed — dreamina CLI 提交成功，等待 Harvest"
-            report_event "$task_id" "phase_c_complete" "{\"jimeng_submit_ids\":${submit_ids}}"
+            # 直接 curl 发送（绕过 report_event 的 subshell payload 传递问题）
+            local _pc_tmp="/tmp/pc_report_$$.json"
+            printf '{"task_id":"%s","event":"phase_c_complete","payload":{"jimeng_submit_ids":%s}}' "$task_id" "$submit_ids" > "$_pc_tmp"
+            (curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+                -H "Content-Type: application/json" \
+                -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+                -d @"$_pc_tmp" --connect-timeout 10 --max-time 30 > /dev/null 2>&1 \
+                && echo "[report] phase_c_complete OK" \
+                || echo "[report] phase_c_complete FAILED"
+                rm -f "$_pc_tmp") &
             return 0
         fi
     else
@@ -1447,8 +1453,7 @@ check_harvesting_tasks() {
     tasks=$(find "$harvesting_dir" -maxdepth 1 -name "*.json" 2>/dev/null)
     [[ -z "$tasks" ]] && return 0
 
-    local scripts_dir
-    scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
     local monitor_script="$scripts_dir/jimeng/jimeng_monitor.mjs"
 
     while IFS= read -r task_file; do
@@ -1507,10 +1512,22 @@ import sys, json
 try:
     d = json.loads(sys.stdin.read())
     c, g, f, t = d.get('completed',0), d.get('generating',0), d.get('failed',0), d.get('total',0)
-    print(f'{c}/{t} 完成, {g} 生成中, {f} 失败')
+    q = d.get('queuing',0)
+    parts = []
+    if c: parts.append(f'{c}/{t}完成')
+    if g: parts.append(f'{g}生成中')
+    if q:
+        qi = d.get('queue_info', {})
+        pos = f' 排#{qi[\"queue_idx\"]}/{qi[\"queue_length\"]}' if qi.get('queue_idx') else ''
+        parts.append(f'{q}排队{pos}')
+    if f:
+        frs = d.get('fail_reasons', [])
+        fr_text = f' ({frs[0][:30]})' if frs else ''
+        parts.append(f'{f}失败{fr_text}')
+    print(', '.join(parts) if parts else f'0/{t} 查询中')
 except: print('查询中')
 " 2>/dev/null || echo "查询中")
-            report_progress "$task_id" "Harvest: ${overall}" "$h_detail"
+            report_progress "$task_id" "${overall}" "$h_detail"
         fi
 
         if [[ "$overall" == "complete" ]]; then
@@ -1572,14 +1589,41 @@ try:
         if fn and vu: cdn_urls[fn] = vu
 except: pass
 
+# 从 submit_state.json 读取 submit_id → (batch_num, model) 映射
+sid_map = {}  # submit_id → {"batch_num": int, "model": str}
+try:
+    work_dir = os.path.dirname(video_dir)  # videos/ 的上级即 work_dir
+    state_path = os.path.join(work_dir, "phase_b", "submit_state.json")
+    if not os.path.exists(state_path):
+        state_path = os.path.join(work_dir, "submit_state.json")
+    with open(state_path) as f:
+        state = json.load(f)
+    if state.get("schema_version", 0) >= 2:
+        for bkey, models in state.get("batches", {}).items():
+            bn = int(bkey.replace("batch", ""))
+            for model_name, info in models.items():
+                sid = info.get("submit_id", "")
+                if sid:
+                    sid_map[sid] = {"batch_num": bn, "model": model_name}
+    print(f"[Harvest] Loaded {len(sid_map)} submit_id mappings from submit_state.json")
+except Exception as e:
+    print(f"[Harvest] submit_state.json not available: {e}")
+
 videos = sorted(glob.glob(os.path.join(video_dir, "*.mp4")))
 video_list = []
 for v in videos:
     sz = os.path.getsize(v)
     if sz <= 10000: continue
     fn = os.path.basename(v)
+    # 从文件名提取 submit_id: {submit_id}_video_1.mp4
+    sid = fn.split("_video_")[0] if "_video_" in fn else ""
     entry = {"filename": fn, "size": sz}
     if fn in cdn_urls: entry["video_url"] = cdn_urls[fn]
+    entry["media_path"] = f"{task_id}/videos/{fn}"
+    # 优先从 submit_state 获取正确的 batch_num 和 model
+    if sid in sid_map:
+        entry["batch_num"] = sid_map[sid]["batch_num"]
+        entry["model"] = sid_map[sid]["model"]
     video_list.append(entry)
 
 body = json.dumps({
@@ -1617,9 +1661,15 @@ HARVEST_PYEOF
                     [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" zjw-mini@192.168.31.222:"$macking_delivery/参考图/" 2>/dev/null
                     [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
                     [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
+                    # 同步原视频（剪辑需要对照原片）
+                    [[ -f "$work_dir/original.mp4" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/original.mp4" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
                     log_info "[Harvest] $task_id: 已同步到 macking ($macking_delivery)"
-                    report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
+                    report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词+原视频已同步到 macking"
                 ) &
+                local rsync_pid=$!
+
+                # 等 rsync 完成再移动目录（防止 rsync 读取已移动的路径）
+                wait "$rsync_pid" 2>/dev/null
 
                 # 移到 completed
                 local completed_dir="${SHARED_DIR}/tasks/completed"
@@ -1639,16 +1689,21 @@ HARVEST_PYEOF
             report_event "$task_id" "task_failed" "{\"error\":\"jimeng_generation_failed\"}"
             mv "$task_file" "${SHARED_DIR}/tasks/failed/$(basename "$task_file")" 2>/dev/null
 
-        elif [[ "$overall" == "generating" ]]; then
-            # 检查超时（90分钟）
+        elif [[ "$overall" == "generating" || "$overall" == "unknown" ]]; then
+            # 检查超时（24小时 — 即梦高峰期可能十几小时）
             local submitted_at
             submitted_at=$(get_task_field "$task_file" "jimeng_submitted_at")
             if [[ -n "$submitted_at" ]]; then
                 local elapsed
                 elapsed=$(python3 -c "from datetime import datetime; print(int((datetime.utcnow()-datetime.fromisoformat('${submitted_at}'.replace('Z','+00:00').replace('+00:00',''))).total_seconds()))" 2>/dev/null || echo 0)
-                if (( elapsed > 5400 )); then
-                    log_error "[Harvest] $task_id: 即梦超时 (${elapsed}s)"
-                    report_event "$task_id" "task_failed" "{\"error\":\"jimeng_generation_timeout\"}"
+                # 每小时报告一次进度（不超时）
+                if (( elapsed % 3600 < 60 )) && (( elapsed > 3600 )); then
+                    report_progress "$task_id" "Harvest: 等待即梦" "已等待 $((elapsed/3600))h，状态: $overall"
+                fi
+                # 24 小时硬超时
+                if (( elapsed > 86400 )); then
+                    log_error "[Harvest] $task_id: 即梦超时 (${elapsed}s / 24h)"
+                    report_event "$task_id" "harvest_timeout" "{\"error\":\"jimeng_generation_timeout_24h\",\"elapsed\":${elapsed}}"
                     mv "$task_file" "${SHARED_DIR}/tasks/failed/$(basename "$task_file")" 2>/dev/null
                 fi
             fi
@@ -1728,6 +1783,35 @@ while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
         phase_c_id=$(echo "$phase_c_resp" | python3 -c "import sys,json; d=json.load(sys.stdin); t=d.get('task'); print(t['id'] if t else '')" 2>/dev/null || echo "")
 
         if [[ -n "$phase_c_id" ]]; then
+            # 检查是 phase_c_ready 还是 harvest_pending（stale recovery 释放的）
+            claimed_progress=$(echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(t.get('phase_progress',''))" 2>/dev/null || echo "")
+
+            if [[ "$claimed_progress" == "harvesting" ]]; then
+                # ── Harvest 认领：直接跑 harvest，不跑 Phase C ──
+                log_info "Claimed HARVEST task from VPS: ${phase_c_id}"
+                task_json=$(echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(json.dumps(t,indent=2))" 2>/dev/null || echo "{}")
+                pending_task="${phase_c_id}.json"
+                local harvest_path="${SHARED_DIR}/tasks/harvesting/${pending_task}"
+                local harvest_work="${SHARED_DIR}/tasks/harvesting/work_${phase_c_id}"
+                mkdir -p "$harvest_work/phase_b" "$harvest_work/videos"
+                echo "$task_json" > "$harvest_path"
+                update_task_json "$harvest_path" "work_dir" "$harvest_work" || true
+                # submit_state.json 需要从 jimeng_project_id 重建（里面存的是 submit_ids JSON）
+                local project_id
+                project_id=$(echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(t.get('jimeng_project_id',''))" 2>/dev/null || echo "")
+                if [[ -n "$project_id" ]] && [[ "$project_id" == "["* ]]; then
+                    python3 -c "
+import json, sys
+ids = json.loads(sys.argv[1])
+state = {'schema_version':2,'mode':'cli','submit_ids':ids,'batches':{}}
+with open(sys.argv[2],'w') as f: json.dump(state,f,indent=2)
+" "$project_id" "$harvest_work/phase_b/submit_state.json" 2>/dev/null
+                    update_task_json "$harvest_path" "jimeng_submit_ids" "$project_id" || true
+                fi
+                log_info "Harvest task ready, will be checked in next harvest cycle"
+                continue
+            fi
+
             log_info "Claimed Phase C task from VPS: ${phase_c_id}"
 
             # 写 JSON 到本地 running 目录
