@@ -15,7 +15,7 @@ set -euo pipefail
 
 INSTALL_DIR="$HOME/bin/ffmpeg-portable"
 LINK_DIR="$HOME/bin"
-MACKING_HOST="${MACKING_HOST:-192.168.31.222}"
+MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set — set in .production.env}"
 MACKING_USER="${MACKING_USER:-zjw-mini}"
 BUNDLE_PATH="/tmp/ffmpeg-portable-arm64.tar.gz"
 

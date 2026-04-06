@@ -188,6 +188,23 @@ if [[ $COMPLETED -eq $TOTAL ]]; then
     OVERALL="complete"
 elif [[ $FAILED -eq $TOTAL ]]; then
     OVERALL="failed"
+elif [[ $((COMPLETED + FAILED)) -eq $TOTAL ]]; then
+    # 所有任务都有最终状态（部分成功部分失败），视为完成
+    OVERALL="complete"
+elif [[ $COMPLETED -gt 0 ]] && [[ $((GENERATING + QUEUING)) -gt 0 ]]; then
+    # 有完成的也有未完成的——检查是否超时（提交超过 2 小时仍有 querying/generating 视为降级完成）
+    # 检查 submit_state.json 文件年龄（作为提交时间近似）
+    if [[ -f "$SUBMIT_STATE" ]]; then
+        FILE_AGE_MIN=$(( ($(date +%s) - $(stat -f %m "$SUBMIT_STATE" 2>/dev/null || echo $(date +%s))) / 60 ))
+        if [[ $FILE_AGE_MIN -ge 120 ]] && [[ $COMPLETED -ge $((TOTAL / 2)) ]]; then
+            log "Timeout: ${FILE_AGE_MIN}min since submit, $COMPLETED/$TOTAL complete — treating as complete (remaining stuck)"
+            OVERALL="complete"
+        else
+            OVERALL="generating"
+        fi
+    else
+        OVERALL="generating"
+    fi
 elif [[ $((GENERATING + QUEUING)) -gt 0 ]]; then
     OVERALL="generating"
 else

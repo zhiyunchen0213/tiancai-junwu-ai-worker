@@ -51,43 +51,61 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     echo "下载尝试 $ATTEMPT/$MAX_ATTEMPTS..."
 
     # YouTube 下载策略：
-    # 1. 优先 SSH 到 macking 下载（macking 有 Safari YouTube 登录态，不会被轮换）
-    # 2. Fallback 到本机 Safari（如果 worker 本机有 YouTube 登录）
-    MACKING_HOST="${MACKING_HOST:-192.168.31.222}"
+    # - MACKING_HOST=localhost → 本机就是 macking，直接本地 yt-dlp
+    # - MACKING_HOST=IP → SSH 到 macking 代理下载，fallback 到本机
+    # MACKING_HOST 必须在 .production.env 中设置（已由 worker_main.sh 校验）
+    MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
     MACKING_USER="${MACKING_USER:-zjw-mini}"
     DOWNLOAD_DONE=0
 
-    # 方案 1: macking 代理下载
-    echo "[DEBUG] Testing SSH to macking: $MACKING_USER@$MACKING_HOST"
-    if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" true 2>&1; then
-        echo "通过 macking ($MACKING_HOST) 代理下载..."
-        REMOTE_DIR="/tmp/yt-dl-$$-${RANDOM}"
-        # 在 macking 上下载到临时目录，merge 为 mp4
-        if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" \
-            "export PATH=/opt/homebrew/bin:\$PATH; mkdir -p $REMOTE_DIR && yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o '$REMOTE_DIR/video.%(ext)s' '$URL' && ls $REMOTE_DIR/*.mp4" \
-            2>"$WORK_DIR/download.log"; then
-            # 找到下载的 mp4 文件，scp 回本机
-            REMOTE_FILE=$(ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "ls $REMOTE_DIR/*.mp4 2>/dev/null | head -1")
-            if [[ -n "$REMOTE_FILE" ]]; then
-                if scp -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST:$REMOTE_FILE" "$WORK_DIR/original.mp4" 2>/dev/null; then
-                    ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
-                    DOWNLOAD_DONE=1
-                    DOWNLOAD_SUCCESS=1
-                    echo -e "${GREEN}✓ 视频下载成功（macking 代理）${NC}"
-                    break
-                fi
-            fi
-        fi
-        ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
-        echo "macking 代理下载失败，尝试本机..."
+    # 构建 cookie 参数（优先 cookie 文件，fallback 到 Safari browser cookies）
+    COOKIE_ARGS=""
+    if [[ -n "${YT_COOKIES_FILE:-}" ]] && [[ -f "$YT_COOKIES_FILE" ]]; then
+        COOKIE_ARGS="--cookies $YT_COOKIES_FILE"
+    else
+        COOKIE_ARGS="--cookies-from-browser safari"
     fi
 
-    # 方案 2: 本机直接下载（fallback）
-    if [[ $DOWNLOAD_DONE -eq 0 ]]; then
-        if yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
+    # 判断是否本机就是 macking（dev 环境）
+    if [[ "$MACKING_HOST" == "localhost" || "$MACKING_HOST" == "127.0.0.1" ]]; then
+        # 本机直接下载（开发机 = macking）
+        echo "本机模式（MACKING_HOST=$MACKING_HOST），直接下载..."
+        if yt-dlp $COOKIE_ARGS --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
             DOWNLOAD_SUCCESS=1
             echo -e "${GREEN}✓ 视频下载成功（本机）${NC}"
             break
+        fi
+    else
+        # 方案 1: SSH 到 macking 代理下载
+        echo "[DEBUG] Testing SSH to macking: $MACKING_USER@$MACKING_HOST"
+        if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" true 2>&1; then
+            echo "通过 macking ($MACKING_HOST) 代理下载..."
+            REMOTE_DIR="/tmp/yt-dl-$$-${RANDOM}"
+            if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" \
+                "export PATH=/opt/homebrew/bin:\$PATH; mkdir -p $REMOTE_DIR && yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o '$REMOTE_DIR/video.%(ext)s' '$URL' && ls $REMOTE_DIR/*.mp4" \
+                2>"$WORK_DIR/download.log"; then
+                REMOTE_FILE=$(ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "ls $REMOTE_DIR/*.mp4 2>/dev/null | head -1")
+                if [[ -n "$REMOTE_FILE" ]]; then
+                    if scp -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST:$REMOTE_FILE" "$WORK_DIR/original.mp4" 2>/dev/null; then
+                        ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
+                        DOWNLOAD_DONE=1
+                        DOWNLOAD_SUCCESS=1
+                        echo -e "${GREEN}✓ 视频下载成功（macking 代理）${NC}"
+                        break
+                    fi
+                fi
+            fi
+            ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
+            echo "macking 代理下载失败，尝试本机..."
+        fi
+
+        # 方案 2: 本机直接下载（fallback）
+        if [[ $DOWNLOAD_DONE -eq 0 ]]; then
+            if yt-dlp $COOKIE_ARGS --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
+                DOWNLOAD_SUCCESS=1
+                echo -e "${GREEN}✓ 视频下载成功（本机）${NC}"
+                break
+            fi
         fi
     fi
 

@@ -7,8 +7,8 @@
 
 set -euo pipefail
 
-# 确保 Homebrew 工具可用（macOS Worker 必须）
-export PATH="$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
+# 确保 Homebrew + 用户工具可用（macOS Worker 必须）
+export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 # macOS 不自带 timeout（coreutils），提供 fallback
 if ! command -v timeout &>/dev/null; then
@@ -30,6 +30,16 @@ fi
 : "${POLL_INTERVAL:=10}"
 : "${MAX_RETRIES:=3}"
 : "${CDP_PORT:=9222}"
+
+# macking 连接参数（必须在 .production.env 中设置）
+# dev 环境: MACKING_HOST=localhost  生产环境: MACKING_HOST=<macking LAN IP>
+: "${MACKING_HOST:?MACKING_HOST not set — set to localhost (dev) or macking LAN IP (prod) in .production.env}"
+: "${MACKING_USER:=zjw-mini}"
+
+# 判断本机是否就是 macking（dev 模式：MACKING_HOST=localhost）
+is_local_macking() {
+    [[ "$MACKING_HOST" == "localhost" || "$MACKING_HOST" == "127.0.0.1" ]]
+}
 
 # ============================================================================
 # 日志函数 (Logging Functions)
@@ -359,6 +369,45 @@ run_recovery_check() {
 # 阶段执行函数 (Phase Execution Functions)
 # ============================================================================
 
+# ============================================================================
+# 原视频上传 (Source Video Upload)
+# ============================================================================
+
+# 上传 Phase A 产出的 original.mp4 到 VPS，作为下游剪辑包的唯一真相源。
+# 背景：commit a7bf2ec 后 Phase A worker 完成即释放任务，Harvest 由其他 worker
+# 执行，Harvest worker 的 work_dir 里没有 original.mp4。所以必须在 Phase A
+# 下载完成时立即把原视频上传到 VPS。
+# 失败只 warn，不阻塞 Phase A（原视频是交付增强，不是关键路径）。
+upload_source_video() {
+    local task_id="$1"
+    local src_file="$2"
+
+    if [[ ! -f "$src_file" ]]; then
+        log_warn "[PhaseA] $task_id: original.mp4 not found, skip source upload"
+        return 0
+    fi
+
+    local size
+    size=$(stat -f%z "$src_file" 2>/dev/null || stat -c%s "$src_file" 2>/dev/null || echo 0)
+    if [[ "$size" -lt 10240 ]]; then
+        log_warn "[PhaseA] $task_id: original.mp4 too small (${size}B), skip source upload"
+        return 0
+    fi
+
+    local url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/upload-source-video"
+    if curl -sf -X POST \
+        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@${src_file}" \
+        --max-time 180 --retry 2 --retry-delay 3 --retry-max-time 180 \
+        "$url" > /dev/null 2>&1; then
+        log_info "[PhaseA] $task_id: source video uploaded (${size} bytes)"
+    else
+        log_warn "[PhaseA] $task_id: source video upload failed (non-fatal)"
+    fi
+    return 0
+}
+
 # Phase A: 下载、转录、分析视频 (Download, transcribe, analyze video)
 run_phase_a() {
     local task_file="$1"
@@ -385,7 +434,12 @@ run_phase_a() {
     update_task_json "$task_path" "phase" "phase_a" || true
     update_task_json "$task_path" "phase_progress" "phase_a_running" || true
 
-    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    local scripts_dir
+    scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+    if [[ -z "$scripts_dir" ]] || [[ ! -d "$scripts_dir" ]]; then
+        log_error "SCRIPTS_DIR resolution failed (BASH_SOURCE=${BASH_SOURCE[0]}); set SCRIPTS_DIR env var explicitly"
+        return 1
+    fi
 
     # Step 1: 下载视频（只下载，不提取帧/音频 — Kimi 可以直接分析视频）
     log_info "Phase A Step 1/2: download_and_extract.sh"
@@ -393,6 +447,9 @@ run_phase_a() {
         log_error "download_and_extract.sh failed"
         return 1
     fi
+
+    # 上传原视频到 VPS（下游 ZIP 下载 / macking 剪辑包的唯一真相源）
+    upload_source_video "$task_id" "$work_dir/original.mp4" || true
 
     # Step 2: Kimi 视频分析 + 后台 Whisper 预备
     # Kimi 直接分析视频；同时后台跑 Whisper，如果 Kimi 失败可立即降级
@@ -898,7 +955,12 @@ run_phase_c() {
     local task_id
     task_id=$(get_task_field "$task_path" "id")
     task_id="${task_id:-$(basename "$task_file" .json)}"
-    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    local scripts_dir
+    scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+    if [[ -z "$scripts_dir" ]] || [[ ! -d "$scripts_dir" ]]; then
+        log_error "SCRIPTS_DIR resolution failed (BASH_SOURCE=${BASH_SOURCE[0]}); set SCRIPTS_DIR env var explicitly"
+        return 1
+    fi
 
     log_info "Starting Phase C for ${task_file} (task_id: ${task_id})"
     update_task_json "$task_path" "phase" "phase_c" || true
@@ -969,6 +1031,9 @@ if m:
             local local_path="${refs_dir}/${ref_file}"
             [[ -f "$local_path" ]] && continue
 
+            # 所有下载分支共用的临时文件路径（必须在 set -u 环境下无条件声明）
+            local tmp_dl="${local_path}.tmp"
+
             # 1. 优先从 VPS HTTP 下载着装参考图
             local costume_fn=""
             costume_fn=$(echo "$ref_results_json" | python3 -c "
@@ -983,8 +1048,6 @@ for c in data.get('costume', []):
             if [[ -n "$costume_fn" ]]; then
                 local encoded_fn
                 encoded_fn=$(python3 -c "from urllib.parse import quote; print(quote('${costume_fn}'))" 2>/dev/null || echo "$costume_fn")
-
-                local tmp_dl="${local_path}.tmp"
                 if [[ "$is_per_story" == "true" ]]; then
                     # per-story: 角色参考图在 /ref-images/{taskId}/
                     local encoded_tid
@@ -1011,12 +1074,19 @@ for c in data.get('costume', []):
                     { log_info "  Downloaded default from VPS: $ref_file"; synced=true; }
             fi
 
-            # 3. 最后降级：从 macking SCP（仅固定 IP 模式）
+            # 3. 最后降级：从 macking 获取（仅固定 IP 模式）
             if [[ "$synced" != "true" ]] && [[ "$is_per_story" != "true" ]] && [[ -n "${MACKING_HOST:-}" ]]; then
-                local default_remote="${MACKING_USER:-zjw-mini}@${MACKING_HOST}:~/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
-                scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$default_remote" "$local_path" 2>/dev/null && \
-                    log_info "  Synced from macking: $ref_file" || \
-                    log_warn "  Failed to sync: $ref_file"
+                if is_local_macking; then
+                    local default_local="$HOME/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
+                    [[ -f "$default_local" ]] && cp "$default_local" "$local_path" 2>/dev/null && \
+                        { log_info "  Copied local ref: $ref_file"; synced=true; } || \
+                        log_warn "  Local ref not found: $default_local"
+                else
+                    local default_remote="${MACKING_USER}@${MACKING_HOST}:~/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
+                    scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$default_remote" "$local_path" 2>/dev/null && \
+                        { log_info "  Synced from macking: $ref_file"; synced=true; } || \
+                        log_warn "  Failed to sync: $ref_file"
+                fi
             fi
 
             if [[ "$synced" != "true" ]]; then
@@ -1234,12 +1304,20 @@ finalize_task() {
 
     # 同步生成视频和产出文件到 macking 中控机统一存储
     if [[ -n "${MACKING_HOST:-}" ]] && [[ -d "$new_work_dir" ]]; then
-        local delivery_dir="${MACKING_USER:-zjw-mini}@${MACKING_HOST}:~/production/delivery/${task_id}/"
-        log_info "Syncing deliverables to macking: $delivery_dir"
-        rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
-            "$new_work_dir/" "$delivery_dir" 2>/dev/null && \
-            log_info "Deliverables synced to macking" || \
-            log_warn "Failed to sync to macking (non-fatal, files remain on worker)"
+        if is_local_macking; then
+            local delivery_dir="$HOME/production/delivery/${task_id}/"
+            log_info "Syncing deliverables locally: $delivery_dir"
+            mkdir -p "$delivery_dir" && cp -a "$new_work_dir/"* "$delivery_dir" 2>/dev/null && \
+                log_info "Deliverables synced locally" || \
+                log_warn "Failed to sync locally (non-fatal, files remain in work dir)"
+        else
+            local delivery_dir="${MACKING_USER}@${MACKING_HOST}:~/production/delivery/${task_id}/"
+            log_info "Syncing deliverables to macking: $delivery_dir"
+            rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
+                "$new_work_dir/" "$delivery_dir" 2>/dev/null && \
+                log_info "Deliverables synced to macking" || \
+                log_warn "Failed to sync to macking (non-fatal, files remain on worker)"
+        fi
     fi
 
     # 移动任务 JSON
@@ -1394,7 +1472,12 @@ check_harvesting_tasks() {
     tasks=$(find "$harvesting_dir" -maxdepth 1 -name "*.json" 2>/dev/null)
     [[ -z "$tasks" ]] && return 0
 
-    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+    local scripts_dir
+    scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+    if [[ -z "$scripts_dir" ]] || [[ ! -d "$scripts_dir" ]]; then
+        log_error "SCRIPTS_DIR resolution failed (BASH_SOURCE=${BASH_SOURCE[0]}); set SCRIPTS_DIR env var explicitly"
+        return 1
+    fi
     local monitor_script="$scripts_dir/jimeng/jimeng_monitor.mjs"
 
     while IFS= read -r task_file; do
@@ -1541,22 +1624,35 @@ print(ok)
                 fi
 
                 # ── 后台同步到 macking（剪辑团队用，非关键路径） ──
-                local macking_delivery="/Users/zjw-mini/production/deliveries/${task_id}"
-                (
-                    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
-                        zjw-mini@192.168.31.222 \
-                        "mkdir -p '$macking_delivery/videos' '$macking_delivery/参考图'" 2>/dev/null \
-                    && rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
-                        "$video_dir/" zjw-mini@192.168.31.222:"$macking_delivery/videos/" 2>/dev/null \
-                    && log_info "[Harvest] $task_id: 视频已同步到 macking" \
-                    || log_warn "[Harvest] $task_id: macking 同步失败（不影响预览）"
-                    # 同步参考图/提示词/原视频
-                    [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" zjw-mini@192.168.31.222:"$macking_delivery/参考图/" 2>/dev/null
-                    [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    [[ -f "$work_dir/original.mp4" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/original.mp4" zjw-mini@192.168.31.222:"$macking_delivery/" 2>/dev/null
-                    report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
-                ) &
+                if is_local_macking; then
+                    # 本机就是 macking，本地 cp 即可
+                    local macking_delivery="$HOME/production/deliveries/${task_id}"
+                    (
+                        mkdir -p "$macking_delivery/videos" "$macking_delivery/参考图"
+                        cp -a "$video_dir/"* "$macking_delivery/videos/" 2>/dev/null
+                        [[ -d "$work_dir/参考图" ]] && cp -a "$work_dir/参考图/"* "$macking_delivery/参考图/" 2>/dev/null
+                        [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && cp "$work_dir/phase_b/即梦提示词.md" "$macking_delivery/" 2>/dev/null
+                        [[ -f "$work_dir/phase_b/submit_state.json" ]] && cp "$work_dir/phase_b/submit_state.json" "$macking_delivery/" 2>/dev/null
+                        log_info "[Harvest] $task_id: 剪辑包已就绪（本地）"
+                        report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已保存到本地"
+                    ) &
+                else
+                    local macking_delivery="/Users/${MACKING_USER}/production/deliveries/${task_id}"
+                    (
+                        ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+                            "${MACKING_USER}@${MACKING_HOST}" \
+                            "mkdir -p '$macking_delivery/videos' '$macking_delivery/参考图'" 2>/dev/null \
+                        && rsync -az -e "ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no" \
+                            "$video_dir/" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/videos/" 2>/dev/null \
+                        && log_info "[Harvest] $task_id: 视频已同步到 macking" \
+                        || log_warn "[Harvest] $task_id: macking 同步失败（不影响预览）"
+                        # 同步参考图/提示词/原视频
+                        [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/参考图/" 2>/dev/null
+                        [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/" 2>/dev/null
+                        [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/" 2>/dev/null
+                        report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
+                    ) &
+                fi
 
                 # ── 上报 harvest_complete ──
                 TASK_ID="$task_id" VIDEO_DIR="$video_dir" HARVEST_RAW="$raw" \

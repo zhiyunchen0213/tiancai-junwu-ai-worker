@@ -138,9 +138,13 @@ print(f"  共 {len(batches)} 个批次")
 os.remove(sys.argv[1])  # 清理临时文件
 PYEOF
 
-# ── Step 3: 复制原视频 ──
-echo "[3/5] 复制原视频..."
+# ── Step 3: 获取原视频 ──
+# 优先级: 本地 delivery 目录（存量兼容）→ VPS 回拉（新路径）
+echo "[3/5] 获取原视频..."
 ORIGINAL=""
+CLEANUP_TMP=""
+
+# 1) 本地 delivery 目录（存量任务可能已经有）
 for candidate in \
     "$DELIVERY_DIR/original.mp4" \
     "$DELIVERIES_DIR/original.mp4"; do
@@ -150,12 +154,35 @@ for candidate in \
     fi
 done
 
+# 2) 本地没有 → 从 VPS 回拉
+if [[ -z "$ORIGINAL" ]] && [[ -n "$DTOK" ]]; then
+    TMP_ORIG="/tmp/original_${TASK_ID}_$$.mp4"
+    if curl -sf \
+        -H "Authorization: Bearer ${DTOK}" \
+        --max-time 180 --retry 2 --retry-delay 3 --retry-max-time 180 \
+        "${REVIEW_URL}/api/v1/tasks/${TASK_ID}/source-video" \
+        -o "$TMP_ORIG" 2>/dev/null && [[ -s "$TMP_ORIG" ]]; then
+        ORIGINAL="$TMP_ORIG"
+        CLEANUP_TMP="$TMP_ORIG"
+        echo "  ✓ 从 VPS 回拉原视频"
+    else
+        rm -f "$TMP_ORIG"
+    fi
+fi
+
+# 3) 落位到包内
 if [[ -n "$ORIGINAL" ]]; then
-    ln "$ORIGINAL" "$PACKAGE_DIR/原视频.mp4" 2>/dev/null || \
-        cp "$ORIGINAL" "$PACKAGE_DIR/原视频.mp4"
+    if [[ -n "$CLEANUP_TMP" ]]; then
+        # 来自 /tmp 的回拉文件：mv（跨 FS 时自动 copy+unlink）
+        mv "$ORIGINAL" "$PACKAGE_DIR/原视频.mp4"
+    else
+        # 来自本地 delivery 目录：硬链接优先（不占磁盘），失败降级 cp
+        ln "$ORIGINAL" "$PACKAGE_DIR/原视频.mp4" 2>/dev/null || \
+            cp "$ORIGINAL" "$PACKAGE_DIR/原视频.mp4"
+    fi
     echo "  ✓ 原视频已添加"
 else
-    echo "  ⚠ 原视频不存在（可能未同步到 macking）"
+    echo "  ⚠ 原视频回拉失败，包中缺失"
 fi
 
 # ── Step 4: 写入改编大纲 ──
