@@ -78,8 +78,25 @@ CREDITS_REFUNDED=0
 
 log "Checking $TOTAL submit_ids..."
 
+# --- Load cached status from submit_state.json (防止终态回退) ---
+# 从 batches 里提取每个 submit_id 的上次缓存状态
+CACHED_STATUS=$(python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    state = json.load(f)
+cache = {}
+for bk, models in state.get('batches', {}).items():
+    for mk, info in models.items():
+        sid = info.get('submit_id', '')
+        st = info.get('cached_gen_status', '')
+        if sid and st:
+            cache[sid] = st
+print(json.dumps(cache))
+" "$SUBMIT_STATE" 2>/dev/null || echo '{}')
+
 # --- Query each submit_id ---
 ALL_RESULTS=""
+STATUS_UPDATES=""  # collect sid:status pairs to write back
 while IFS= read -r submit_id; do
     [[ -z "$submit_id" ]] && continue
 
@@ -153,6 +170,18 @@ print(json.dumps({
     ALL_RESULTS="${ALL_RESULTS}${result}\n"
 
     status=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
+
+    # --- 终态保护：已完成/已失败的 submit_id 不允许回退 ---
+    cached=$(echo "$CACHED_STATUS" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('$submit_id',''))" 2>/dev/null)
+    if [[ "$cached" == "success" && "$status" != "success" ]]; then
+        log "  $submit_id: API returned '$status' but cached='success' → keeping success (防止回退)"
+        status="success"
+    elif [[ "$cached" == "fail" && "$status" != "fail" && "$status" != "success" ]]; then
+        log "  $submit_id: API returned '$status' but cached='fail' → keeping fail (防止回退)"
+        status="fail"
+    fi
+    # 记录本次状态，稍后写回 submit_state.json
+    STATUS_UPDATES="${STATUS_UPDATES}${submit_id}:${status}\n"
 
     case "$status" in
         success)    COMPLETED=$((COMPLETED + 1)) ;;
@@ -256,8 +285,8 @@ print(json.dumps(videos))
 PYEOF
 )
 
-# --- Update submit_state.json with harvest results ---
-python3 - "$SUBMIT_STATE" "$OVERALL" "$COMPLETED" "$FAILED" "$CREDITS_CHARGED" "$CREDITS_REFUNDED" << 'PYEOF'
+# --- Update submit_state.json with harvest results + cached_gen_status ---
+echo -e "$STATUS_UPDATES" | python3 - "$SUBMIT_STATE" "$OVERALL" "$COMPLETED" "$FAILED" "$CREDITS_CHARGED" "$CREDITS_REFUNDED" << 'PYEOF'
 import sys, json
 from datetime import datetime, timezone
 
@@ -278,6 +307,20 @@ state["harvest"] = {
     "credits_refunded": int(sys.argv[6]) if len(sys.argv) > 6 else 0,
 }
 state["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+# Write cached_gen_status per submit_id into batches (终态保护)
+status_lines = sys.stdin.read().strip().split('\n')
+status_map = {}
+for line in status_lines:
+    if ':' in line:
+        sid, st = line.split(':', 1)
+        status_map[sid.strip()] = st.strip()
+
+for bk, models in state.get('batches', {}).items():
+    for mk, info in models.items():
+        sid = info.get('submit_id', '')
+        if sid in status_map:
+            info['cached_gen_status'] = status_map[sid]
 
 with open(state_path, 'w') as f:
     json.dump(state, f, indent=2, ensure_ascii=False)
