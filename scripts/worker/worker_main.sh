@@ -366,9 +366,25 @@ run_recovery_check() {
                 mkdir -p "$completed_a_dir"
                 mv "$task_file" "$completed_a_dir/$(basename "$task_file")" 2>/dev/null || true
                 ;;
-            "phase_b_complete"|"phase_c_ready"|"phase_c_running")
+            "phase_b_complete"|"phase_c_ready")
                 # Phase C ready — 通过 poll-phase-c 认领，不在 recovery 里跑
                 log_info "Phase C ready (progress: $phase_progress), will be claimed via poll-phase-c"
+                local completed_a_dir="${SHARED_DIR}/tasks/completed"
+                mkdir -p "$completed_a_dir"
+                mv "$task_file" "$completed_a_dir/$(basename "$task_file")" 2>/dev/null || true
+                ;;
+            "phase_c_running")
+                # Phase C 被中断（worker 重启）— 通知 VPS 释放，让其他 worker 重新认领
+                log_warn "Phase C was interrupted (progress: phase_c_running), releasing back to VPS"
+                local _release_tid
+                _release_tid=$(get_task_field "$task_file" "task_id")
+                if [[ -n "$_release_tid" ]]; then
+                    curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+                        -H "Content-Type: application/json" \
+                        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+                        -d "{\"task_id\":\"$_release_tid\",\"event\":\"phase_c_interrupted\",\"payload\":{\"reason\":\"worker_restart\"}}" \
+                        > /dev/null 2>&1 || true
+                fi
                 local completed_a_dir="${SHARED_DIR}/tasks/completed"
                 mkdir -p "$completed_a_dir"
                 mv "$task_file" "$completed_a_dir/$(basename "$task_file")" 2>/dev/null || true
