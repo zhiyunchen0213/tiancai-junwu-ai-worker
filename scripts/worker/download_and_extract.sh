@@ -253,9 +253,9 @@ if [ -n \"\$SAFARI_BIN\" ] && [ -f \"\$SCRIPTS/safari_cookies_export.py\" ]; the
     [ -s \"\${CK_TMP}.txt\" ] && CK_FILE=\"\${CK_TMP}.txt\"
 fi
 
-# 尝试 1: yt-dlp
+# 尝试 1: yt-dlp (用 = 连接 --cookies=FILE，避免 zsh 不做 word splitting)
 CK_ARGS=''
-[ -n \"\$CK_FILE\" ] && CK_ARGS=\"--cookies \$CK_FILE\"
+[ -n \"\$CK_FILE\" ] && CK_ARGS=\"--cookies=\$CK_FILE\"
 echo \"[下载器] yt-dlp (cookie: \$CK_ARGS)\"
 if yt-dlp \$CK_ARGS --merge-output-format mp4 -o '$remote_dir/video.%(ext)s' '$URL' 2>&1; then
     rm -f \"\$CK_FILE\"
