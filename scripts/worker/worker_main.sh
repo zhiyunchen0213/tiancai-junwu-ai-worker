@@ -187,20 +187,32 @@ report_event() {
     local event="$2"
     local payload="${3:-{}}"
 
-    (
+    # task_failed 同步执行（确保错误信息可靠送达），其他事件后台执行
+    local _run_sync=0
+    [[ "$event" == "task_failed" ]] && _run_sync=1
+
+    _do_report() {
         # 写 payload 到临时文件（printf 保留 JSON 原文，避免 echo 破坏引号）
         _tmp="/tmp/report_$$_${RANDOM}.json"
         printf '%s' "$payload" > "$_tmp" 2>/dev/null || printf '{}' > "$_tmp"
 
         # 用 Python 安全构建 body（处理嵌套 JSON 转义）
         _body=$(python3 -c "
-import json
+import json, sys
 try:
     with open('$_tmp') as f: p = json.loads(f.read())
-except: p = {}
+except Exception as e:
+    print(f'[report] WARNING: JSON parse failed: {e}, payload was: $(cat "$_tmp" 2>/dev/null | head -c 200)', file=sys.stderr)
+    p = {}
 print(json.dumps({'task_id':'$task_id','event':'$event','payload':p}))
-" 2>/dev/null)
+" 2>&1)
         rm -f "$_tmp"
+
+        # 如果 python 输出包含 WARNING，打印到 stderr 但继续（body 是最后一行）
+        if echo "$_body" | grep -q '^\[report\] WARNING'; then
+            echo "$_body" | grep '^\[report\] WARNING' >&2
+            _body=$(echo "$_body" | grep -v '^\[report\] WARNING' | tail -1)
+        fi
 
         [ -z "$_body" ] && _body="{\"task_id\":\"$task_id\",\"event\":\"$event\",\"payload\":{}}"
 
@@ -210,13 +222,21 @@ print(json.dumps({'task_id':'$task_id','event':'$event','payload':p}))
                 -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
                 -d "$_body" --connect-timeout 10 --max-time 30 > /dev/null 2>&1; then
                 echo "[report] $event OK (attempt $_i)"
-                break
+                return 0
             fi
             _delay=$((_i * 10))
             echo "[report] $event attempt $_i failed, retrying in ${_delay}s"
             sleep "$_delay"
         done
-    ) &
+        echo "[report] $event FAILED after 5 attempts" >&2
+        return 1
+    }
+
+    if [[ $_run_sync -eq 1 ]]; then
+        _do_report
+    else
+        (_do_report) &
+    fi
 }
 
 # 轻量进度上报：推送到 VPS SSE，看板实时显示
@@ -441,15 +461,34 @@ run_phase_a() {
         return 1
     fi
 
-    # Step 1: 下载视频（只下载，不提取帧/音频 — Kimi 可以直接分析视频）
-    log_info "Phase A Step 1/2: download_and_extract.sh"
-    if ! bash "$scripts_dir/download_and_extract.sh" "$video_url" "$work_dir"; then
-        log_error "download_and_extract.sh failed"
-        return 1
+    # Step 1: 获取视频
+    # uploaded:// 前缀 = 用户已上传到 VPS，从 VPS 下载而非 yt-dlp
+    if [[ "$video_url" == uploaded://* ]]; then
+        log_info "Phase A Step 1/2: 从 VPS 下载已上传视频"
+        report_progress "$task_id" "下载已上传视频" "从 VPS 回拉"
+        local dl_url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/source-video"
+        if curl -sf -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+            "$dl_url" -o "$work_dir/original.mp4" --connect-timeout 10 --max-time 300; then
+            local dl_size
+            dl_size=$(stat -f%z "$work_dir/original.mp4" 2>/dev/null || stat -c%s "$work_dir/original.mp4" 2>/dev/null || echo 0)
+            log_info "已上传视频下载完成 (${dl_size} bytes)"
+            # 还需要提取帧和音频（download_and_extract.sh 的后半段）
+            bash "$scripts_dir/download_and_extract.sh" "__skip_download__" "$work_dir" || true
+        else
+            log_error "从 VPS 下载已上传视频失败"
+            PHASE_A_FAIL_DETAIL="从VPS下载已上传视频失败"
+            return 1
+        fi
+    else
+        log_info "Phase A Step 1/2: download_and_extract.sh"
+        if ! bash "$scripts_dir/download_and_extract.sh" "$video_url" "$work_dir"; then
+            log_error "download_and_extract.sh failed"
+            PHASE_A_FAIL_DETAIL="视频下载失败"
+            return 1
+        fi
+        # 上传原视频到 VPS（下游 ZIP 下载 / macking 剪辑包的唯一真相源）
+        upload_source_video "$task_id" "$work_dir/original.mp4" || true
     fi
-
-    # 上传原视频到 VPS（下游 ZIP 下载 / macking 剪辑包的唯一真相源）
-    upload_source_video "$task_id" "$work_dir/original.mp4" || true
 
     # Step 2: Kimi 视频分析 + 后台 Whisper 预备
     # Kimi 直接分析视频；同时后台跑 Whisper，如果 Kimi 失败可立即降级
@@ -484,6 +523,7 @@ run_phase_a() {
         # 重试分析（这次 analyze_video.sh 会检测到 transcript.txt 存在并使用它）
         if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}"; then
             log_error "Analysis failed even with fallback"
+            PHASE_A_FAIL_DETAIL="视频分析失败(Kimi+Whisper均失败)"
             return 1
         fi
     fi
@@ -1035,14 +1075,17 @@ if m:
             local tmp_dl="${local_path}.tmp"
 
             # 1. 优先从 VPS HTTP 下载着装参考图
-            local costume_fn=""
-            costume_fn=$(echo "$ref_results_json" | python3 -c "
+            local costume_fn="" costume_group_dir=""
+            read -r costume_fn costume_group_dir < <(echo "$ref_results_json" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 for c in data.get('costume', []):
     if c.get('character') == '${char_name}':
-        print(c.get('filename', '')); break
+        print(c.get('filename', ''), c.get('groupDir', '')); break
 " 2>/dev/null || echo "")
+
+            # 如果 ref_results 没有 groupDir，回退到全局 ip_dir_upper
+            local char_ip_dir="${costume_group_dir:-$ip_dir_upper}"
 
             local synced=false
             if [[ -n "$costume_fn" ]]; then
@@ -1059,9 +1102,11 @@ for c in data.get('costume', []):
                     # 固定 IP: 角色参考图在 /ip-images/{GROUP}/{CharName}/
                     local encoded_char
                     encoded_char=$(python3 -c "from urllib.parse import quote; print(quote('${char_name}'))" 2>/dev/null || echo "$char_name")
-                    local costume_url="${vps_url}/ip-images/${ip_dir_upper}/${encoded_char}/${encoded_fn}"
+                    local encoded_group
+                    encoded_group=$(python3 -c "from urllib.parse import quote; print(quote('${char_ip_dir}'))" 2>/dev/null || echo "$char_ip_dir")
+                    local costume_url="${vps_url}/ip-images/${encoded_group}/${encoded_char}/${encoded_fn}"
                     curl -sf -o "$tmp_dl" "$costume_url" 2>/dev/null && [[ -s "$tmp_dl" ]] && mv "$tmp_dl" "$local_path" && \
-                        { log_info "  Downloaded costume from VPS: $char_name/$costume_fn"; synced=true; }
+                        { log_info "  Downloaded costume from VPS: $char_ip_dir/$char_name/$costume_fn"; synced=true; }
                 fi
             fi
 
@@ -1069,7 +1114,9 @@ for c in data.get('costume', []):
             if [[ "$synced" != "true" ]] && [[ "$is_per_story" != "true" ]]; then
                 local encoded_char_default
                 encoded_char_default=$(python3 -c "from urllib.parse import quote; print(quote('${char_name}'))" 2>/dev/null || echo "$char_name")
-                local default_url="${vps_url}/ip-images/${ip_dir_upper}/${encoded_char_default}/Default.jpeg"
+                local encoded_group_default
+                encoded_group_default=$(python3 -c "from urllib.parse import quote; print(quote('${char_ip_dir}'))" 2>/dev/null || echo "$char_ip_dir")
+                local default_url="${vps_url}/ip-images/${encoded_group_default}/${encoded_char_default}/Default.jpeg"
                 curl -sf -o "$tmp_dl" "$default_url" 2>/dev/null && [[ -s "$tmp_dl" ]] && mv "$tmp_dl" "$local_path" && \
                     { log_info "  Downloaded default from VPS: $ref_file"; synced=true; }
             fi
@@ -1077,12 +1124,12 @@ for c in data.get('costume', []):
             # 3. 最后降级：从 macking 获取（仅固定 IP 模式）
             if [[ "$synced" != "true" ]] && [[ "$is_per_story" != "true" ]] && [[ -n "${MACKING_HOST:-}" ]]; then
                 if is_local_macking; then
-                    local default_local="$HOME/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
+                    local default_local="$HOME/production/ip-library/${char_ip_dir}/${char_name}/Default.jpeg"
                     [[ -f "$default_local" ]] && cp "$default_local" "$local_path" 2>/dev/null && \
                         { log_info "  Copied local ref: $ref_file"; synced=true; } || \
                         log_warn "  Local ref not found: $default_local"
                 else
-                    local default_remote="${MACKING_USER}@${MACKING_HOST}:~/production/ip-library/${ip_dir_upper}/${char_name}/Default.jpeg"
+                    local default_remote="${MACKING_USER}@${MACKING_HOST}:~/production/ip-library/${char_ip_dir}/${char_name}/Default.jpeg"
                     scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "$default_remote" "$local_path" 2>/dev/null && \
                         { log_info "  Synced from macking: $ref_file"; synced=true; } || \
                         log_warn "  Failed to sync: $ref_file"
@@ -1414,7 +1461,14 @@ process_task() {
             log_error "Phase A exceeded max retries, moving to failed"
             local failed_path="${SHARED_DIR}/tasks/failed/${task_file}"
             mv "$task_path" "$failed_path" 2>/dev/null || true
-            report_event "$task_id" "task_failed" "{\"error\":\"phase_a_max_retries\",\"retry_count\":$retry_count}"
+            local fail_detail="${PHASE_A_FAIL_DETAIL:-未知}"
+            # 根据失败原因选择更具体的错误码
+            local error_code="phase_a_max_retries"
+            case "$fail_detail" in
+                *下载*) error_code="phase_a_download_failed" ;;
+                *分析*) error_code="phase_a_analysis_failed" ;;
+            esac
+            report_event "$task_id" "task_failed" "{\"error\":\"$error_code\",\"detail\":\"$fail_detail (重试${retry_count}次)\",\"retry_count\":$retry_count}"
         fi
         return 1
     fi
@@ -1634,6 +1688,11 @@ print(ok)
                         [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && cp "$work_dir/phase_b/即梦提示词.md" "$macking_delivery/" 2>/dev/null
                         [[ -f "$work_dir/phase_b/submit_state.json" ]] && cp "$work_dir/phase_b/submit_state.json" "$macking_delivery/" 2>/dev/null
                         log_info "[Harvest] $task_id: 剪辑包已就绪（本地）"
+                        # 自动整理剪辑包到桌面（含发布信息.txt）
+                        if [[ -f "$SCRIPTS_DIR/prepare_editing_package.sh" ]]; then
+                            bash "$SCRIPTS_DIR/prepare_editing_package.sh" "$task_id" 2>&1 | while read -r line; do log_info "[Package] $line"; done \
+                                || log_warn "[Package] prepare_editing_package.sh 失败（不影响 harvest）"
+                        fi
                         report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已保存到本地"
                     ) &
                 else
@@ -1650,6 +1709,15 @@ print(ok)
                         [[ -d "$work_dir/参考图" ]] && rsync -az -e "ssh -o StrictHostKeyChecking=no" "$work_dir/参考图/" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/参考图/" 2>/dev/null
                         [[ -f "$work_dir/phase_b/即梦提示词.md" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/即梦提示词.md" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/" 2>/dev/null
                         [[ -f "$work_dir/phase_b/submit_state.json" ]] && scp -q -o StrictHostKeyChecking=no "$work_dir/phase_b/submit_state.json" "${MACKING_USER}@${MACKING_HOST}:$macking_delivery/" 2>/dev/null
+                        # 在 macking 上自动整理剪辑包到桌面（含发布信息.txt）
+                        if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no \
+                            "${MACKING_USER}@${MACKING_HOST}" \
+                            "test -f ~/worker-code/scripts/worker/prepare_editing_package.sh" 2>/dev/null; then
+                            ssh -o StrictHostKeyChecking=no "${MACKING_USER}@${MACKING_HOST}" \
+                                "bash ~/worker-code/scripts/worker/prepare_editing_package.sh '$task_id'" 2>&1 \
+                                | while read -r line; do log_info "[Package] $line"; done \
+                                || log_warn "[Package] macking prepare_editing_package.sh 失败（不影响 harvest）"
+                        fi
                         report_progress "$task_id" "剪辑包已就绪" "视频+参考图+提示词已同步到 macking"
                     ) &
                 fi

@@ -29,9 +29,139 @@ URL="$1"
 WORK_DIR="$2"
 START_TIME=$(date +%s)
 
+# __skip_download__ 模式: 视频已存在于 WORK_DIR/original.mp4，只做帧提取/音频/metadata
+if [[ "$URL" == "__skip_download__" ]]; then
+    if [[ ! -f "$WORK_DIR/original.mp4" ]]; then
+        echo -e "${RED}错误: skip_download 模式但 original.mp4 不存在${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}=== 跳过下载，提取帧/音频/元数据 ===${NC}"
+    # 跳到第3步（提取帧）— 用 exec 跳转到后半段
+    VIDEO_SIZE=$(du -h "$WORK_DIR/original.mp4" | cut -f1)
+    echo "视频大小: $VIDEO_SIZE"
+    SKIP_DOWNLOAD=1
+fi
+
+if [[ "${SKIP_DOWNLOAD:-0}" -eq 0 ]]; then
+# ── 多平台 cookie 策略 ──
+# 核心: macking Safari 是所有平台 cookie 的权威源
+#   - yt-dlp --cookies-from-browser safari 在 macOS 15+ 有 bug（容器化路径读不全）
+#   - yt-dlp --cookies-from-browser chrome 在 SSH 下无法解密 Keychain
+#   - 解决: safari_cookies_export.py 直接解析 binarycookies → 临时文件 → --cookies
+#   - 每次下载实时提取，始终最新，不需要定期导出
+#
+# 要求: macking 的 Safari 登录各视频平台 (YouTube/抖音/TikTok/B站/Facebook)
+
+# Safari binarycookies 路径 (macOS 15+ 容器化路径优先)
+find_safari_cookies() {
+    for p in \
+        "$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies" \
+        "$HOME/Library/Cookies/Cookies.binarycookies"; do
+        [[ -f "$p" ]] && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+# 平台 → cookie 域名过滤 (用普通变量, 兼容 bash 3.x)
+PLATFORM_DOMAINS_youtube="youtube.com|google.com|googlevideo.com|googleapis.com"
+PLATFORM_DOMAINS_douyin="douyin.com|iesdouyin.com|bytedance.com|toutiao.com|snssdk.com|amemv.com"
+PLATFORM_DOMAINS_tiktok="tiktok.com|bytedance.com|musical.ly"
+PLATFORM_DOMAINS_bilibili="bilibili.com|bilivideo.com|b23.tv"
+PLATFORM_DOMAINS_facebook="facebook.com|fbcdn.net|fb.com|instagram.com"
+
+# 从 URL 识别平台
+detect_platform() {
+    local url="$1"
+    case "$url" in
+        *douyin.com*|*iesdouyin.com*)  echo "douyin"   ;;
+        *tiktok.com*|*vt.tiktok.com*) echo "tiktok"   ;;
+        *youtube.com*|*youtu.be*)     echo "youtube"   ;;
+        *bilibili.com*|*b23.tv*)      echo "bilibili"  ;;
+        *facebook.com*|*fb.watch*)    echo "facebook"  ;;
+        *)                            echo "unknown"   ;;
+    esac
+}
+
+# 从 Safari binarycookies 实时提取平台 cookie → 临时 Netscape 文件
+# 返回: cookie 文件路径 (调用方负责清理; 文件名含 PID，进程退出后可 rm /tmp/safari_cookies_*)
+extract_safari_cookies() {
+    local platform="$1"
+    local scripts_dir="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)}"
+
+    local safari_bin
+    safari_bin=$(find_safari_cookies) || return 1
+
+    local export_script="$scripts_dir/safari_cookies_export.py"
+    [[ -f "$export_script" ]] || return 1
+
+    local tmp_bin="/tmp/safari_ck_$$.bin"
+    local tmp_all="/tmp/safari_ck_all_$$.txt"
+    local tmp_out="/tmp/safari_ck_${platform}_$$.txt"
+
+    cp "$safari_bin" "$tmp_bin" 2>/dev/null || return 1
+    python3 "$export_script" "$tmp_bin" "$tmp_all" 2>/dev/null || { rm -f "$tmp_bin"; return 1; }
+    rm -f "$tmp_bin"
+
+    # 按平台域名过滤
+    local domains_var="PLATFORM_DOMAINS_${platform}"
+    local domains="${!domains_var:-}"
+    if [[ -z "$domains" ]]; then
+        mv "$tmp_all" "$tmp_out"
+    else
+        local pattern
+        pattern=$(echo "$domains" | tr '|' '\n' | sed 's/\./\\./g' | paste -sd'|' -)
+        {
+            echo "# Netscape HTTP Cookie File"
+            grep -iE "($pattern)" "$tmp_all" || true
+        } > "$tmp_out"
+        rm -f "$tmp_all"
+    fi
+
+    local count
+    count=$(grep -c $'\t' "$tmp_out" 2>/dev/null || echo 0)
+    if [[ $count -le 1 ]]; then
+        rm -f "$tmp_out"
+        return 1
+    fi
+
+    echo "$tmp_out"
+}
+
+# 构建本机 yt-dlp cookie 参数
+resolve_cookie_args() {
+    local platform="$1"
+
+    # 1. 平台专属环境变量 (向后兼容 YT_COOKIES_FILE)
+    local env_file=""
+    case "$platform" in
+        youtube)  env_file="${YT_COOKIES_FILE:-}" ;;
+        douyin)   env_file="${DOUYIN_COOKIES_FILE:-}" ;;
+        tiktok)   env_file="${TIKTOK_COOKIES_FILE:-}" ;;
+        bilibili) env_file="${BILIBILI_COOKIES_FILE:-}" ;;
+        facebook) env_file="${FB_COOKIES_FILE:-}" ;;
+    esac
+    if [[ -n "$env_file" ]] && [[ -f "$env_file" ]]; then
+        echo "--cookies $env_file"
+        return
+    fi
+
+    # 2. 实时从 Safari binarycookies 提取
+    local cookie_file
+    if cookie_file=$(extract_safari_cookies "$platform" 2>/dev/null); then
+        echo "--cookies $cookie_file"
+        return
+    fi
+
+    # 3. 兜底: yt-dlp 自己尝试读浏览器
+    echo "--cookies-from-browser safari"
+}
+
+PLATFORM=$(detect_platform "$URL")
+
 echo -e "${GREEN}=== 视频下载和提取开始 ===${NC}"
 echo "时间戳: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "视频URL: $URL"
+echo "平台: $PLATFORM"
 echo "工作目录: $WORK_DIR"
 
 # 第1步: 创建工作目录
@@ -41,8 +171,137 @@ if ! mkdir -p "$WORK_DIR"; then
     exit 1
 fi
 
-# 第2步: 下载视频 (带重试逻辑)
+# 第2步: 下载视频
+# 下载器链: yt-dlp (通用) → lux (国内平台 fallback, 抖音/B站反爬绕过)
+# 代理策略: 国内平台 (douyin/bilibili) 走直连 (no_proxy=*), 海外平台走系统代理
 echo -e "${YELLOW}[2/5] 下载视频...${NC}"
+
+MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
+MACKING_USER="${MACKING_USER:-zjw-mini}"
+
+# 国内平台需要绕过系统代理 (Clash 等)
+PROXY_ENV=""
+case "$PLATFORM" in
+    douyin|bilibili) PROXY_ENV='no_proxy="*" http_proxy="" https_proxy=""' ;;
+esac
+
+# ── 本机下载函数 ──
+try_download_local() {
+    local cookie_args
+    cookie_args=$(resolve_cookie_args "$PLATFORM")
+    echo "[cookie] 本机策略: $cookie_args"
+
+    # 尝试 1: yt-dlp
+    echo "[下载器] yt-dlp..."
+    if eval "$PROXY_ENV yt-dlp $cookie_args --merge-output-format mp4 -o '$WORK_DIR/original.mp4' '$URL'" 2>"$WORK_DIR/download.log"; then
+        echo -e "${GREEN}✓ 下载成功（本机 yt-dlp）${NC}"
+        return 0
+    fi
+
+    # 尝试 2: lux (国内平台 fallback，绕过反爬)
+    if command -v lux >/dev/null 2>&1; then
+        echo "[下载器] yt-dlp 失败，尝试 lux..."
+        local lux_cookie_arg=""
+        # lux 用 -c 指定 cookie 文件
+        if [[ "$cookie_args" == --cookies\ * ]]; then
+            lux_cookie_arg="-c ${cookie_args#--cookies }"
+        fi
+        if eval "$PROXY_ENV lux $lux_cookie_arg -o '$WORK_DIR' -O original '$URL'" 2>>"$WORK_DIR/download.log"; then
+            # lux 输出文件名可能带扩展名，统一重命名
+            local lux_file
+            lux_file=$(ls "$WORK_DIR"/original.* 2>/dev/null | head -1)
+            if [[ -n "$lux_file" ]] && [[ "$lux_file" != "$WORK_DIR/original.mp4" ]]; then
+                mv "$lux_file" "$WORK_DIR/original.mp4"
+            fi
+            if [[ -f "$WORK_DIR/original.mp4" ]]; then
+                echo -e "${GREEN}✓ 下载成功（本机 lux）${NC}"
+                return 0
+            fi
+        fi
+    fi
+
+    return 1
+}
+
+# ── macking 代理下载函数 ──
+try_download_macking() {
+    echo "[DEBUG] Testing SSH to macking: $MACKING_USER@$MACKING_HOST"
+    ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" true 2>&1 || return 1
+
+    echo "通过 macking ($MACKING_HOST) 代理下载..."
+    local remote_dir="/tmp/yt-dl-$$-${RANDOM}"
+
+    # 在 macking 上执行: Safari cookie 提取 → yt-dlp → lux fallback
+    # 国内平台绕过系统代理 (macking 上 Clash 走 7890)
+    local remote_proxy_env=""
+    case "$PLATFORM" in
+        douyin|bilibili) remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy=""' ;;
+    esac
+
+    REMOTE_SCRIPT="
+export PATH=/opt/homebrew/bin:\$PATH
+$remote_proxy_env
+mkdir -p $remote_dir
+SCRIPTS=\$HOME/worker-code/scripts/worker
+
+# 提取 Safari cookie
+SAFARI_BIN=''
+for p in \"\$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies\" \"\$HOME/Library/Cookies/Cookies.binarycookies\"; do
+    [ -f \"\$p\" ] && SAFARI_BIN=\"\$p\" && break
+done
+CK_FILE=''
+if [ -n \"\$SAFARI_BIN\" ] && [ -f \"\$SCRIPTS/safari_cookies_export.py\" ]; then
+    cp \"\$SAFARI_BIN\" /tmp/mck_\$\$.bin 2>/dev/null
+    python3 \"\$SCRIPTS/safari_cookies_export.py\" /tmp/mck_\$\$.bin /tmp/mck_all_\$\$.txt 2>/dev/null
+    rm -f /tmp/mck_\$\$.bin
+    CK_FILE='/tmp/mck_all_\$\$.txt'
+fi
+
+# 尝试 1: yt-dlp
+CK_ARGS=''
+[ -n \"\$CK_FILE\" ] && CK_ARGS=\"--cookies \$CK_FILE\"
+echo \"[下载器] yt-dlp (cookie: \$CK_ARGS)\"
+if yt-dlp \$CK_ARGS --merge-output-format mp4 -o '$remote_dir/video.%(ext)s' '$URL' 2>&1; then
+    rm -f \"\$CK_FILE\"
+    ls $remote_dir/*.mp4
+    exit 0
+fi
+
+# 尝试 2: lux
+if command -v lux >/dev/null 2>&1; then
+    echo \"[下载器] yt-dlp 失败，尝试 lux...\"
+    LUX_CK=''
+    [ -n \"\$CK_FILE\" ] && LUX_CK=\"-c \$CK_FILE\"
+    if lux \$LUX_CK -o '$remote_dir' -O video '$URL' 2>&1; then
+        # lux 文件名可能带后缀，找到 mp4
+        F=\$(ls $remote_dir/video.* 2>/dev/null | head -1)
+        [ -n \"\$F\" ] && [ \"\$F\" != '$remote_dir/video.mp4' ] && mv \"\$F\" '$remote_dir/video.mp4'
+        rm -f \"\$CK_FILE\"
+        ls $remote_dir/*.mp4
+        exit 0
+    fi
+fi
+
+rm -f \"\$CK_FILE\"
+exit 1
+"
+    if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "$REMOTE_SCRIPT" \
+        2>"$WORK_DIR/download.log"; then
+        REMOTE_FILE=$(ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "ls $remote_dir/*.mp4 2>/dev/null | head -1")
+        if [[ -n "$REMOTE_FILE" ]]; then
+            if scp -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST:$REMOTE_FILE" "$WORK_DIR/original.mp4" 2>/dev/null; then
+                ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$remote_dir'" 2>/dev/null
+                echo -e "${GREEN}✓ 下载成功（macking 代理）${NC}"
+                return 0
+            fi
+        fi
+    fi
+    ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$remote_dir'" 2>/dev/null
+    echo "macking 代理下载失败"
+    return 1
+}
+
+# ── 下载主循环 ──
 MAX_ATTEMPTS=3
 ATTEMPT=1
 DOWNLOAD_SUCCESS=0
@@ -50,70 +309,37 @@ DOWNLOAD_SUCCESS=0
 while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
     echo "下载尝试 $ATTEMPT/$MAX_ATTEMPTS..."
 
-    # YouTube 下载策略：
-    # - MACKING_HOST=localhost → 本机就是 macking，直接本地 yt-dlp
-    # - MACKING_HOST=IP → SSH 到 macking 代理下载，fallback 到本机
-    # MACKING_HOST 必须在 .production.env 中设置（已由 worker_main.sh 校验）
-    MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
-    MACKING_USER="${MACKING_USER:-zjw-mini}"
-    DOWNLOAD_DONE=0
-
-    # 构建 cookie 参数（优先 cookie 文件，fallback 到 Safari browser cookies）
-    COOKIE_ARGS=""
-    if [[ -n "${YT_COOKIES_FILE:-}" ]] && [[ -f "$YT_COOKIES_FILE" ]]; then
-        COOKIE_ARGS="--cookies $YT_COOKIES_FILE"
-    else
-        COOKIE_ARGS="--cookies-from-browser safari"
-    fi
-
-    # 判断是否本机就是 macking（dev 环境）
     if [[ "$MACKING_HOST" == "localhost" || "$MACKING_HOST" == "127.0.0.1" ]]; then
-        # 本机直接下载（开发机 = macking）
-        echo "本机模式（MACKING_HOST=$MACKING_HOST），直接下载..."
-        if yt-dlp $COOKIE_ARGS --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
+        echo "本机模式（MACKING_HOST=${MACKING_HOST}）"
+        if try_download_local; then
             DOWNLOAD_SUCCESS=1
-            echo -e "${GREEN}✓ 视频下载成功（本机）${NC}"
             break
         fi
     else
-        # 方案 1: SSH 到 macking 代理下载
-        echo "[DEBUG] Testing SSH to macking: $MACKING_USER@$MACKING_HOST"
-        if ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" true 2>&1; then
-            echo "通过 macking ($MACKING_HOST) 代理下载..."
-            REMOTE_DIR="/tmp/yt-dl-$$-${RANDOM}"
-            if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" \
-                "export PATH=/opt/homebrew/bin:\$PATH; mkdir -p $REMOTE_DIR && yt-dlp --cookies-from-browser safari --merge-output-format mp4 -o '$REMOTE_DIR/video.%(ext)s' '$URL' && ls $REMOTE_DIR/*.mp4" \
-                2>"$WORK_DIR/download.log"; then
-                REMOTE_FILE=$(ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "ls $REMOTE_DIR/*.mp4 2>/dev/null | head -1")
-                if [[ -n "$REMOTE_FILE" ]]; then
-                    if scp -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST:$REMOTE_FILE" "$WORK_DIR/original.mp4" 2>/dev/null; then
-                        ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
-                        DOWNLOAD_DONE=1
-                        DOWNLOAD_SUCCESS=1
-                        echo -e "${GREEN}✓ 视频下载成功（macking 代理）${NC}"
-                        break
-                    fi
-                fi
-            fi
-            ssh "$MACKING_USER@$MACKING_HOST" "rm -rf '$REMOTE_DIR'" 2>/dev/null
-            echo "macking 代理下载失败，尝试本机..."
+        # 远程 worker: macking 代理优先，本机 fallback
+        if try_download_macking; then
+            DOWNLOAD_SUCCESS=1
+            break
         fi
-
-        # 方案 2: 本机直接下载（fallback）
-        if [[ $DOWNLOAD_DONE -eq 0 ]]; then
-            if yt-dlp $COOKIE_ARGS --merge-output-format mp4 -o "$WORK_DIR/original.mp4" "$URL" 2>"$WORK_DIR/download.log"; then
-                DOWNLOAD_SUCCESS=1
-                echo -e "${GREEN}✓ 视频下载成功（本机）${NC}"
-                break
-            fi
+        echo "尝试本机 fallback..."
+        if try_download_local; then
+            DOWNLOAD_SUCCESS=1
+            break
         fi
     fi
 
     DOWNLOAD_ERROR=$(cat "$WORK_DIR/download.log" 2>/dev/null || echo "未知错误")
-    if echo "$DOWNLOAD_ERROR" | grep -qE "(地理限制|年龄限制|不可用|私密|已删除)"; then
+
+    # 终端错误: 不可重试
+    if echo "$DOWNLOAD_ERROR" | grep -qiE "(地理限制|年龄限制|不可用|私密|已删除|geo.restricted|private|removed)"; then
         echo -e "${RED}✗ 终端错误: $DOWNLOAD_ERROR${NC}"
         exit 1
     fi
+    # Cookie 错误提示
+    if echo "$DOWNLOAD_ERROR" | grep -qiE "(cookie|Fresh cookies|login required|sign in)"; then
+        echo -e "${YELLOW}⚠ ${PLATFORM} 需要 cookie — 请在 macking Safari 登录该平台${NC}"
+    fi
+
     if [[ $ATTEMPT -lt $MAX_ATTEMPTS ]]; then
         WAIT=$((5 * ATTEMPT))
         echo "等待 $WAIT 秒后重试..."
@@ -124,7 +350,8 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
 done
 
 if [[ $DOWNLOAD_SUCCESS -eq 0 ]]; then
-    echo -e "${RED}错误: 视频下载失败 (已尝试 $MAX_ATTEMPTS 次)${NC}"
+    echo -e "${RED}错误: 视频下载失败 (平台: ${PLATFORM}, 已尝试 $MAX_ATTEMPTS 次)${NC}"
+    cat "$WORK_DIR/download.log" 2>/dev/null | tail -5
     exit 1
 fi
 
@@ -136,6 +363,8 @@ fi
 
 VIDEO_SIZE=$(du -h "$WORK_DIR/original.mp4" | cut -f1)
 echo "视频大小: $VIDEO_SIZE"
+
+fi  # end SKIP_DOWNLOAD guard
 
 # 第3步: 提取关键帧
 echo -e "${YELLOW}[3/5] 提取关键帧...${NC}"

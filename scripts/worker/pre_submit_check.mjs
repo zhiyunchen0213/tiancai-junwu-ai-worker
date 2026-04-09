@@ -84,7 +84,12 @@ function extractJimengConfig(mdContent) {
   }
 
   try {
-    return JSON.parse(match[1]);
+    // strip 可能的 ```json ... ``` 双重包裹（Claude 偶尔在 <!-- --> 内又加 code fence）
+    const cleaned = match[1]
+      .replace(/^```json\s*\n?/, '')
+      .replace(/\n?```\s*$/, '')
+      .trim();
+    return JSON.parse(cleaned);
   } catch {
     return null;
   }

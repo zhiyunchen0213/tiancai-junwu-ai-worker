@@ -80,7 +80,11 @@ if not m:
     sys.exit(0)
 
 try:
-    cfg = json.loads(m.group(1))
+    raw = m.group(1)
+    # strip 双重包裹（Claude 偶尔在 <!-- --> 内又加 ```json ``` code fence）
+    raw = re.sub(r'^```json\s*\n?', '', raw)
+    raw = re.sub(r'\n?```\s*$', '', raw)
+    cfg = json.loads(raw.strip())
 except json.JSONDecodeError as e:
     print(json.dumps({"error": f"JSON parse error: {e}"}))
     sys.exit(0)
