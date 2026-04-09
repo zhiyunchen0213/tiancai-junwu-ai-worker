@@ -465,7 +465,7 @@ run_phase_a() {
     # uploaded:// 前缀 = 用户已上传到 VPS，从 VPS 下载而非 yt-dlp
     if [[ "$video_url" == uploaded://* ]]; then
         log_info "Phase A Step 1/2: 从 VPS 下载已上传视频"
-        report_progress "$task_id" "下载已上传视频" "从 VPS 回拉"
+        report_progress "$task_id" "Phase A: 下载视频" "从 VPS 回拉已上传视频"
         local dl_url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/source-video"
         if curl -sf -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
             "$dl_url" -o "$work_dir/original.mp4" --connect-timeout 10 --max-time 300; then
@@ -481,18 +481,21 @@ run_phase_a() {
         fi
     else
         log_info "Phase A Step 1/2: download_and_extract.sh"
+        report_progress "$task_id" "Phase A: 下载视频" "正在从 ${video_url%%\?*} 下载"
         if ! bash "$scripts_dir/download_and_extract.sh" "$video_url" "$work_dir"; then
             log_error "download_and_extract.sh failed"
             PHASE_A_FAIL_DETAIL="视频下载失败"
             return 1
         fi
         # 上传原视频到 VPS（下游 ZIP 下载 / macking 剪辑包的唯一真相源）
+        report_progress "$task_id" "Phase A: 上传原视频" "同步到 VPS"
         upload_source_video "$task_id" "$work_dir/original.mp4" || true
     fi
 
     # Step 2: Kimi 视频分析 + 后台 Whisper 预备
     # Kimi 直接分析视频；同时后台跑 Whisper，如果 Kimi 失败可立即降级
     log_info "Phase A Step 2/2: analyze_video.sh (Kimi 直接分析视频)"
+    report_progress "$task_id" "Phase A: 视频分析" "Kimi 分析视频内容 + Whisper 转写"
 
     # 后台启动 Whisper 转写（不阻塞 Kimi，仅在降级时使用）
     # 安全措施：timeout 300s 防止 Whisper 卡死，日志限 50MB 防爆盘
@@ -514,6 +517,7 @@ run_phase_a() {
     fi
     if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}"; then
         log_warn "Kimi analysis failed, falling back to Whisper transcription + text analysis"
+        report_progress "$task_id" "Phase A: 分析降级" "Kimi 失败，等待 Whisper 降级重试"
         # 降级方案: 等后台 Whisper 完成，然后用转写文本重试分析
         if [[ -n "$whisper_pid" ]]; then
             log_info "等待后台 Whisper 完成 (pid=$whisper_pid)..."
