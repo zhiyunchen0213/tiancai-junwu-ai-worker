@@ -198,15 +198,10 @@ try_download_local() {
         return 0
     fi
 
-    # 尝试 2: lux (国内平台 fallback，绕过反爬)
+    # 尝试 2: lux (国内平台 fallback，不支持 cookie 参数)
     if command -v lux >/dev/null 2>&1; then
         echo "[下载器] yt-dlp 失败，尝试 lux..."
-        local lux_cookie_arg=""
-        # lux 用 -c 指定 cookie 文件
-        if [[ "$cookie_args" == --cookies\ * ]]; then
-            lux_cookie_arg="-c ${cookie_args#--cookies }"
-        fi
-        if eval "$PROXY_ENV lux $lux_cookie_arg -o '$WORK_DIR' -O original '$URL'" 2>>"$WORK_DIR/download.log"; then
+        if eval "$PROXY_ENV lux -o '$WORK_DIR' -O original '$URL'" 2>>"$WORK_DIR/download.log"; then
             # lux 输出文件名可能带扩展名，统一重命名
             local lux_file
             lux_file=$(ls "$WORK_DIR"/original.* 2>/dev/null | head -1)
@@ -251,10 +246,11 @@ for p in \"\$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cooki
 done
 CK_FILE=''
 if [ -n \"\$SAFARI_BIN\" ] && [ -f \"\$SCRIPTS/safari_cookies_export.py\" ]; then
-    cp \"\$SAFARI_BIN\" /tmp/mck_\$\$.bin 2>/dev/null
-    python3 \"\$SCRIPTS/safari_cookies_export.py\" /tmp/mck_\$\$.bin /tmp/mck_all_\$\$.txt 2>/dev/null
-    rm -f /tmp/mck_\$\$.bin
-    CK_FILE='/tmp/mck_all_\$\$.txt'
+    CK_TMP=\"/tmp/mck_dl_\${RANDOM}\"
+    cp \"\$SAFARI_BIN\" \"\${CK_TMP}.bin\" 2>/dev/null
+    python3 \"\$SCRIPTS/safari_cookies_export.py\" \"\${CK_TMP}.bin\" \"\${CK_TMP}.txt\" 2>/dev/null
+    rm -f \"\${CK_TMP}.bin\"
+    [ -s \"\${CK_TMP}.txt\" ] && CK_FILE=\"\${CK_TMP}.txt\"
 fi
 
 # 尝试 1: yt-dlp
@@ -267,12 +263,10 @@ if yt-dlp \$CK_ARGS --merge-output-format mp4 -o '$remote_dir/video.%(ext)s' '$U
     exit 0
 fi
 
-# 尝试 2: lux
+# 尝试 2: lux (不支持 cookie 参数，仅用于国内平台 fallback)
 if command -v lux >/dev/null 2>&1; then
     echo \"[下载器] yt-dlp 失败，尝试 lux...\"
-    LUX_CK=''
-    [ -n \"\$CK_FILE\" ] && LUX_CK=\"-c \$CK_FILE\"
-    if lux \$LUX_CK -o '$remote_dir' -O video '$URL' 2>&1; then
+    if lux -o '$remote_dir' -O video '$URL' 2>&1; then
         # lux 文件名可能带后缀，找到 mp4
         F=\$(ls $remote_dir/video.* 2>/dev/null | head -1)
         [ -n \"\$F\" ] && [ \"\$F\" != '$remote_dir/video.mp4' ] && mv \"\$F\" '$remote_dir/video.mp4'
