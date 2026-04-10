@@ -376,14 +376,20 @@ run_recovery_check() {
             "phase_c_running")
                 # Phase C 被中断（worker 重启）— 通知 VPS 释放，让其他 worker 重新认领
                 log_warn "Phase C was interrupted (progress: phase_c_running), releasing back to VPS"
+                # task.json 里通常没有 task_id 字段，直接从文件名派生（与 1426 行同模式）
                 local _release_tid
                 _release_tid=$(get_task_field "$task_file" "task_id")
+                _release_tid="${_release_tid:-$(basename "$task_file" .json)}"
                 if [[ -n "$_release_tid" ]]; then
-                    curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+                    if curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
                         -H "Content-Type: application/json" \
                         -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
                         -d "{\"task_id\":\"$_release_tid\",\"event\":\"phase_c_interrupted\",\"payload\":{\"reason\":\"worker_restart\"}}" \
-                        > /dev/null 2>&1 || true
+                        > /dev/null 2>&1; then
+                        log_info "  Notified VPS: $_release_tid released"
+                    else
+                        log_warn "  Failed to notify VPS for $_release_tid (task may stay stuck)"
+                    fi
                 fi
                 local completed_a_dir="${SHARED_DIR}/tasks/completed"
                 mkdir -p "$completed_a_dir"
@@ -1095,14 +1101,22 @@ if m:
             local tmp_dl="${local_path}.tmp"
 
             # 1. 优先从 VPS HTTP 下载着装参考图
+            # 注意：set -e 环境下 read < <(...) 空输出会退出脚本，改用 $(...) 安全提取
             local costume_fn="" costume_group_dir=""
-            read -r costume_fn costume_group_dir < <(echo "$ref_results_json" | python3 -c "
+            local _costume_line
+            _costume_line=$(echo "$ref_results_json" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
 for c in data.get('costume', []):
     if c.get('character') == '${char_name}':
         print(c.get('filename', ''), c.get('groupDir', '')); break
 " 2>/dev/null || echo "")
+            if [[ -n "$_costume_line" ]]; then
+                costume_fn="${_costume_line% *}"
+                costume_group_dir="${_costume_line##* }"
+                # 若 python 只输出了 filename（无 groupDir），上面的 cut 会得到相同值 → 清空 groupDir
+                [[ "$costume_fn" == "$costume_group_dir" ]] && costume_group_dir=""
+            fi
 
             # 如果 ref_results 没有 groupDir，回退到全局 ip_dir_upper
             local char_ip_dir="${costume_group_dir:-$ip_dir_upper}"
@@ -1602,11 +1616,23 @@ check_harvesting_tasks() {
 
         log_info "[Harvest] $task_id: status=$overall"
 
-        # 上报 harvest 轮询状态
+        # 计算等待时长（从 jimeng_submitted_at 起）
+        local elapsed_text=""
+        local submitted_at_for_detail
+        submitted_at_for_detail=$(get_task_field "$task_file" "jimeng_submitted_at")
+        if [[ -n "$submitted_at_for_detail" ]]; then
+            local _elapsed
+            _elapsed=$(python3 -c "from datetime import datetime; print(int((datetime.utcnow()-datetime.fromisoformat('${submitted_at_for_detail}'.replace('Z','+00:00').replace('+00:00',''))).total_seconds()))" 2>/dev/null || echo 0)
+            if (( _elapsed > 0 )); then
+                elapsed_text="已等待 $((_elapsed/3600))h$(((_elapsed%3600)/60))m"
+            fi
+        fi
+
+        # 上报 harvest 轮询状态（合并聚合信息 + 等待时长为一条）
         if [[ -n "$raw" ]]; then
             local h_detail
-            h_detail=$(echo "$raw" | python3 -c "
-import sys, json
+            h_detail=$(echo "$raw" | ELAPSED_TEXT="$elapsed_text" python3 -c "
+import sys, json, os
 try:
     d = json.loads(sys.stdin.read())
     c, g, f, t = d.get('completed',0), d.get('generating',0), d.get('failed',0), d.get('total',0)
@@ -1622,10 +1648,15 @@ try:
         frs = d.get('fail_reasons', [])
         fr_text = f' ({frs[0][:30]})' if frs else ''
         parts.append(f'{f}失败{fr_text}')
-    print(', '.join(parts) if parts else f'0/{t} 查询中')
+    base = ', '.join(parts) if parts else f'0/{t} 查询中'
+    elapsed = os.environ.get('ELAPSED_TEXT', '')
+    print(f'{base} · {elapsed}' if elapsed else base)
 except: print('查询中')
 " 2>/dev/null || echo "查询中")
-            report_progress "$task_id" "${overall}" "$h_detail"
+            report_progress "$task_id" "Harvest: ${overall}" "$h_detail"
+        else
+            # 没拿到 raw（harvest cli 失败）也上报一下，避免看板失联
+            report_progress "$task_id" "Harvest: 查询失败" "harvest cli 无返回${elapsed_text:+，$elapsed_text}"
         fi
 
         if [[ "$overall" == "complete" ]]; then
@@ -1891,17 +1922,12 @@ HARVEST_PYEOF
             mv "$task_file" "${SHARED_DIR}/tasks/failed/$(basename "$task_file")" 2>/dev/null
 
         elif [[ "$overall" == "generating" || "$overall" == "unknown" ]]; then
-            # 检查超时（24小时 — 即梦高峰期可能十几小时）
+            # 24 小时硬超时检查（进度上报已在上面合并的 h_detail 里完成）
             local submitted_at
             submitted_at=$(get_task_field "$task_file" "jimeng_submitted_at")
             if [[ -n "$submitted_at" ]]; then
                 local elapsed
                 elapsed=$(python3 -c "from datetime import datetime; print(int((datetime.utcnow()-datetime.fromisoformat('${submitted_at}'.replace('Z','+00:00').replace('+00:00',''))).total_seconds()))" 2>/dev/null || echo 0)
-                # 每小时报告一次进度（不超时）
-                if (( elapsed % 3600 < 60 )) && (( elapsed > 3600 )); then
-                    report_progress "$task_id" "Harvest: 等待即梦" "已等待 $((elapsed/3600))h，状态: $overall"
-                fi
-                # 24 小时硬超时
                 if (( elapsed > 86400 )); then
                     log_error "[Harvest] $task_id: 即梦超时 (${elapsed}s / 24h)"
                     report_event "$task_id" "harvest_timeout" "{\"error\":\"jimeng_generation_timeout_24h\",\"elapsed\":${elapsed}}"
@@ -1909,7 +1935,6 @@ HARVEST_PYEOF
                 fi
             fi
         fi
-        # unknown/error: 跳过，下次再查
     done <<< "$tasks"
 }
 

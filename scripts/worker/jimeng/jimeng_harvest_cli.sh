@@ -222,15 +222,30 @@ elif [[ $((COMPLETED + FAILED)) -eq $TOTAL ]]; then
     OVERALL="complete"
 elif [[ $COMPLETED -gt 0 ]] && [[ $((GENERATING + QUEUING)) -gt 0 ]]; then
     # 有完成的也有未完成的——检查是否超时（提交超过 2 小时仍有 querying/generating 视为降级完成）
-    # 检查 submit_state.json 文件年龄（作为提交时间近似）
+    # 读 submit_state.json 里 batches 最早的 submitted_at（字段内容，不是文件 mtime — mtime 每次轮询都会被更新）
+    SUBMIT_AGE_MIN=0
     if [[ -f "$SUBMIT_STATE" ]]; then
-        FILE_AGE_MIN=$(( ($(date +%s) - $(stat -f %m "$SUBMIT_STATE" 2>/dev/null || echo $(date +%s))) / 60 ))
-        if [[ $FILE_AGE_MIN -ge 120 ]] && [[ $COMPLETED -ge $((TOTAL / 2)) ]]; then
-            log "Timeout: ${FILE_AGE_MIN}min since submit, $COMPLETED/$TOTAL complete — treating as complete (remaining stuck)"
-            OVERALL="complete"
-        else
-            OVERALL="generating"
-        fi
+        SUBMIT_AGE_MIN=$(python3 -c "
+import json, sys
+from datetime import datetime, timezone
+try:
+    with open('$SUBMIT_STATE') as f: d = json.load(f)
+    ts = []
+    for b in d.get('batches', {}).values():
+        for m in b.values() if isinstance(b, dict) else []:
+            if isinstance(m, dict) and 'submitted_at' in m:
+                ts.append(m['submitted_at'])
+    if not ts: print(0); sys.exit(0)
+    earliest = min(ts)
+    dt = datetime.fromisoformat(earliest.replace('Z','+00:00'))
+    now = datetime.now(timezone.utc)
+    print(int((now - dt).total_seconds() / 60))
+except Exception as e: print(0, file=sys.stderr); print(0)
+" 2>/dev/null || echo 0)
+    fi
+    if [[ $SUBMIT_AGE_MIN -ge 120 ]] && [[ $COMPLETED -ge $((TOTAL / 2)) ]]; then
+        log "Downgrade: ${SUBMIT_AGE_MIN}min since first submit, $COMPLETED/$TOTAL complete — treating as complete (remaining stuck)"
+        OVERALL="complete"
     else
         OVERALL="generating"
     fi
