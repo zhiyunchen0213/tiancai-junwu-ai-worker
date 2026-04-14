@@ -18,6 +18,11 @@ MEDIA_SRC="$WORKER_DIR/media-server"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/production/logs"
 
+# 东莞 macking 直连 GitHub 被 GFW 阻断，走 ClashX Pro 的 7890 代理.
+# 如果 ClashX 没跑，git clone 会 75 秒超时，脚本会卡住然后报错.
+export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7890}"
+export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7890}"
+
 echo "=== media-server bootstrap ==="
 
 # Step 1: 收集 MEDIA_TOKEN

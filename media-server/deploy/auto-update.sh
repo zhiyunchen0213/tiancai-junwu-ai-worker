@@ -7,6 +7,12 @@
 
 set -euo pipefail
 
+# 东莞 macking 直连 GitHub 443 被 GFW 阻断，走本地 ClashX Pro 的 7890 端口代理.
+# LaunchAgent 启动的脚本不继承用户 shell env，必须显式 export.
+# 如果 ClashX 没在跑，git pull 会卡 75 秒后超时 (set -e 会导致 script 退出).
+export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7890}"
+export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7890}"
+
 cd "$HOME/worker-code" || exit 1
 
 # git fetch/pull，抓 HEAD 更新前后的 SHA 比较
