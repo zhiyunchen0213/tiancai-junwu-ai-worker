@@ -23,11 +23,21 @@ shared/
 ├── schemas/          # 数据契约
 │   └── task.schema.json
 └── templates/        # 批量清单模板
+media-server/         # macking 专用: 零依赖 Node 媒体回源服务
+├── server.mjs
+├── deploy/           # bootstrap.sh, plist 模板, auto-update.sh
+└── README.md
 ```
 
 ## 部署步骤
 
+### 普通 worker (m1~m4)
 1. Clone 此仓库到 Mac mini
 2. 复制 `scripts/setup/.env.template` 到 `~/.production.env` 并填写配置
 3. 运行 `bash scripts/setup/worker_setup.sh`
 4. 启动 Worker: `bash scripts/worker/worker_main.sh`
+
+### macking (媒体服务 + 存储)
+1. 不跑 worker_main
+2. 首次部署: 参考 `media-server/README.md` 的 Token Rotation + bootstrap 流程
+3. 后续代码更新由 `com.tiancai.worker-auto-update` LaunchAgent 每 10 分钟自动 git pull

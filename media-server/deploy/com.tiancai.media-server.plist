@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.tiancai.media-server.plist — template
+
+  这是 macking 上的 media-server LaunchAgent 模板。
+  bootstrap.sh 会把 __MEDIA_TOKEN__ 替换成实际的 token 值后安装到
+  ~/Library/LaunchAgents/com.tiancai.media-server.plist。
+
+  修改本 template 后生产不会自动生效，必须在 macking 上重跑 bootstrap.sh
+  或者手动更新实际的 plist 并 bootout + bootstrap。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tiancai.media-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>__HOME__/worker-code/media-server/server.mjs</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/production/logs/media-server.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/production/logs/media-server.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>MEDIA_TOKEN</key><string>__MEDIA_TOKEN__</string>
+    <key>MEDIA_ROOT</key><string>__HOME__/production/deliveries</string>
+    <key>PORT</key><string>9000</string>
+  </dict>
+</dict>
+</plist>

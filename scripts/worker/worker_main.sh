@@ -2012,6 +2012,26 @@ while [[ $SHUTDOWN_REQUESTED -eq 0 ]]; do
             # 检查是 phase_c_ready 还是 harvest_pending（stale recovery 释放的）
             claimed_progress=$(echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(t.get('phase_progress',''))" 2>/dev/null || echo "")
 
+            if [[ "$claimed_progress" == "packaging" ]]; then
+                # ── Canvas 打包认领：运行 package_canvas_task.sh ──
+                echo "[worker] Canvas packaging task: $phase_c_id"
+                REVIEW_SERVER_URL="$REVIEW_SERVER_URL" DISPATCHER_TOKEN="$DISPATCHER_TOKEN" \
+                MACKING_HOST="$MACKING_HOST" MACKING_USER="$MACKING_USER" \
+                WORKER_ID="$WORKER_ID" \
+                bash "${SCRIPTS_DIR}/package_canvas_task.sh" "$phase_c_id"
+                pkg_rc=$?
+                if [[ $pkg_rc -eq 0 ]]; then
+                    echo "[worker] Canvas packaging complete for $phase_c_id"
+                else
+                    echo "[worker] Canvas packaging failed for $phase_c_id" >&2
+                    curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/${phase_c_id}/report" \
+                        -H "Authorization: Bearer $DISPATCHER_TOKEN" \
+                        -H "Content-Type: application/json" \
+                        -d '{"phase_progress":"packaging_failed"}' > /dev/null 2>&1 || true
+                fi
+                continue
+            fi
+
             if [[ "$claimed_progress" == "harvesting" ]]; then
                 # ── Harvest 认领：直接跑 harvest，不跑 Phase C ──
                 log_info "Claimed HARVEST task from VPS: ${phase_c_id}"

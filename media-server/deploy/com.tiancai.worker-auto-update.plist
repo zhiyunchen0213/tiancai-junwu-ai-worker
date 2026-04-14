@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  com.tiancai.worker-auto-update.plist
+
+  macking 上的代码自动同步 agent。每 600 秒从 worker repo 拉一次，
+  如果 media-server/ 目录有变更则 kickstart media-server LaunchAgent 让其重载。
+
+  m1~m4 上也有类似的 agent（监听 scripts/worker/ 变更，重启 worker_main），
+  但 macking 不跑 worker_main，所以监听的是 media-server/。
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.tiancai.worker-auto-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__HOME__/worker-code/media-server/deploy/auto-update.sh</string>
+  </array>
+  <key>StartInterval</key><integer>600</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>__HOME__/production/logs/worker-auto-update.log</string>
+  <key>StandardErrorPath</key><string>__HOME__/production/logs/worker-auto-update.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
