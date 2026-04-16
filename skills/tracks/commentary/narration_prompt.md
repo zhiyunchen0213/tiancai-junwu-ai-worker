@@ -16,7 +16,14 @@ You MUST output exactly this JSON shape (no markdown, no prose outside the JSON)
   "events": ["...", "..."],
   "tease":  "...",
   "cta":    { "template_id": "<from cta_templates.json>", "text": "..." },
-  "reveal": "..."
+  "reveal": "...",
+  "translations": {
+    "hook": "<中文>",
+    "events": ["<中文>", "..."],
+    "tease": "<中文>",
+    "cta": "<中文>",
+    "reveal": "<中文>"
+  }
 }
 ```
 
@@ -28,10 +35,28 @@ You MUST output exactly this JSON shape (no markdown, no prose outside the JSON)
 4. **cta** — Pick ONE of the CTA templates you were given (input below). Use its `text` verbatim. The `template_id` must match the template you picked.
 5. **reveal** — 1 sentence. Must be **emotionally suggestive but not literal** — describe the impact, not the thing. Model: "their father experienced the most unforgettable moment of his life."
 
+## Additional output: translations
+
+In addition to the English fields above, also output a `translations` object with Chinese translations of every narration section (for human reviewer reference only — NOT used in TTS/audio). The translations help Chinese-speaking reviewers verify the script makes sense without relying on English alone.
+
+Add it as a sibling of `hook`/`events`/`tease`/`cta`/`reveal`:
+
+```json
+"translations": {
+  "hook": "<中文翻译>",
+  "events": ["<中文翻译>", ...],
+  "tease": "<中文翻译>",
+  "cta": "<中文翻译>",
+  "reveal": "<中文翻译>"
+}
+```
+
+The translations must be natural Chinese (not word-for-word literal). `translations.events` must have the same count as `events`. `translations.cta` translates the CTA text only.
+
 ## Hard constraints
 
 - Pure JSON output. No markdown fences. No trailing commentary.
-- All text in American English. No Chinese characters.
+- All text in the main fields (`hook`, `events`, `tease`, `cta`, `reveal`) MUST be American English. No Chinese characters in those fields. Chinese is ONLY allowed inside `translations`.
 - No contractions in hook or reveal (feels more cinematic). Contractions OK in events and tease.
 - Zero sponsor plugs, zero merch mentions.
 
