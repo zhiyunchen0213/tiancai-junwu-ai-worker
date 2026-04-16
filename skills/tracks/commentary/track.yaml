@@ -1,0 +1,29 @@
+id: commentary
+kind: commentary
+name: 解说赛道 (YouTube Shorts style)
+description: Gemini 分析视频 → Claude 写英文网感五段解说 → ElevenLabs TTS，不合成视频，只给剪辑素材
+version: "1.0"
+created_at: "2026-04-15"
+author: tiancai
+
+# TTS — routed via Kie async job (elevenlabs/text-to-dialogue-v3)
+# See scripts/worker/commentary/tts_narration.mjs
+tts:
+  provider: kie       # 'kie' (默认, 走 api.kie.ai 异步 job); 历史值 'elevenlabs' 已废弃
+  voice_id: "Brian"    # Kie 接受预设名 (Adam/Alice/Brian) 或 ElevenLabs voice ID
+  stability: 0.5
+
+# Script writer — routed via Kie Anthropic-compatible endpoint by default
+# See scripts/worker/commentary/lib/claude-client.mjs
+script:
+  provider: kie       # 'kie' (bearer auth) | 'apimart' (x-api-key) | 'anthropic' (直连)
+  model: claude-sonnet-4-6
+  style: "美式网感第三人称过去式，单句 10-15 词，参考节奏 150wpm（软提示）"
+  structure: ["hook", "events", "tease", "cta", "reveal"]
+  # CTA 位置固定：tease 之后、reveal 之前
+  cta_rotation: random   # 种子来自 taskId
+
+# Mixing
+mixing:
+  duck_original_db: -18
+  narration_volume_db: 0

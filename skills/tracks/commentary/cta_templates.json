@@ -1,0 +1,24 @@
+[
+  {
+    "id": "angels_devils",
+    "text": "But first, who protects you? If you chose the angels, like this video and subscribe to the channel. Those who skip are choosing the devil. If you truly chose the angels, share this video and leave a heart emoji in the comments."
+  },
+  {
+    "id": "heroes_villains",
+    "text": "But before you see it, tell me — are you a hero or a villain? Heroes smash that like button right now. Villains keep scrolling. If you're a real hero, subscribe and drop a fire emoji below."
+  },
+  {
+    "id": "would_you_help",
+    "text": "But first, ask yourself — would you have helped him, or walked away? If you'd help, like this video and follow the channel. If you'd walk away, keep scrolling. Real ones drop a heart in the comments.",
+    "ending_hint": "helpful_characters_wanted"
+  },
+  {
+    "id": "good_people_check",
+    "text": "But wait — are you one of the good ones? If you are, tap that like button and subscribe. If you scroll past, you already answered. Good people always comment below.",
+    "ending_hint": "everyman_moral_choice"
+  },
+  {
+    "id": "believer_skeptic",
+    "text": "But before the twist — are you a believer or a skeptic? Believers like and subscribe. Skeptics, prove me wrong and share this. Drop a comment telling me which one you are."
+  }
+]
