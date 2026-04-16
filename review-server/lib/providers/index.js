@@ -2,12 +2,10 @@
 // Provider 路由
 
 import * as apimart from './apimart-gemini.js';
-import * as kie from './kie-gemini.js';
 import * as official from './official-gemini.js';
 
 const PROVIDERS = {
   apimart,
-  kie,
   official,
 };
 

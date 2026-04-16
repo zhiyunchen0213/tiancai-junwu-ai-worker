@@ -73,6 +73,7 @@ export async function buildScript({ taskId, scenes, templates, promptPath, claud
       const parsed = parseClaudeResponse(raw);
       validateShape(parsed, templates);
       const ratio = computeCtaPositionRatio(parsed);
+      // Note: ...parsed already passes through optional fields like `translations`
       return {
         ...parsed,
         metadata: {
