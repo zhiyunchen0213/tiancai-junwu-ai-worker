@@ -44,16 +44,25 @@ else
 fi
 
 # Also upload to VPS so review-server can serve files via /api/commentary/deliveries.
-# Worker → VPS goes through the SSH tunnel (REVIEW_SERVER_URL = localhost:13000 on worker,
-# but scp goes through the reverse tunnel ssh port). Use REVIEW_SERVER_SSH or "brain".
-VPS_SSH="${REVIEW_SERVER_SSH:-brain}"
-VPS_DELIVERY_DIR="~/production/deliveries/$TASK_ID/commentary/"
-echo "[package] uploading to VPS ($VPS_SSH)..."
-if ssh "$VPS_SSH" "mkdir -p $VPS_DELIVERY_DIR" 2>/dev/null && \
-   scp -q "$DELIVERY_DIR"/* "${VPS_SSH}:${VPS_DELIVERY_DIR}" 2>/dev/null; then
-  echo "[package] VPS upload OK"
-else
-  echo "[package] VPS upload failed (non-fatal, files stay on worker)" >&2
-fi
+# Workers can NOT scp to VPS (no SSH from worker to VPS in the GFW topology), but
+# they DO have HTTP access via REVIEW_SERVER_URL (autossh -L 13000:localhost:3000).
+# Push each file via multipart POST to the dedicated upload endpoint.
+echo "[package] uploading to VPS via HTTP..."
+upload_ok=0
+upload_fail=0
+for f in "$DELIVERY_DIR"/*; do
+  fname=$(basename "$f")
+  if curl -sf -X POST "${REVIEW_SERVER_URL}/api/commentary/deliveries/${TASK_ID}/upload" \
+      -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+      -F "name=${fname}" \
+      -F "file=@${f}" \
+      --max-time 120 > /dev/null 2>&1; then
+    upload_ok=$((upload_ok + 1))
+  else
+    upload_fail=$((upload_fail + 1))
+    echo "[package]   ✗ upload $fname failed" >&2
+  fi
+done
+echo "[package] VPS upload: $upload_ok ok / $upload_fail failed"
 
 echo "[package] delivered"
