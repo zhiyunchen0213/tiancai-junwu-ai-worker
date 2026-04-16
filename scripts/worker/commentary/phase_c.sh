@@ -38,8 +38,14 @@ node "$SCRIPT_DIR/tts_narration.mjs" "$WORK_DIR"
 # drop {original.mp4 + narration.mp3 + subtitles.srt} into 剪映 / CapCut / FCP
 # without any extra work. Whisper writes <basename>.srt next to the output_dir;
 # we rename it to subtitles.srt for a stable delivery filename.
-WHISPER_BIN="${WHISPER_BIN:-/opt/homebrew/bin/whisper}"
-if [[ -x "$WHISPER_BIN" ]] && [[ -f "$WORK_DIR/narration.mp3" ]]; then
+# Resolve whisper binary: env override → PATH → common pip install paths
+WHISPER_BIN="${WHISPER_BIN:-$(command -v whisper 2>/dev/null || true)}"
+if [[ -z "$WHISPER_BIN" ]]; then
+  for _wb in /opt/homebrew/bin/whisper ~/Library/Python/*/bin/whisper ~/.local/bin/whisper /usr/local/bin/whisper; do
+    [[ -x "$_wb" ]] && WHISPER_BIN="$_wb" && break
+  done
+fi
+if [[ -n "$WHISPER_BIN" && -x "$WHISPER_BIN" ]] && [[ -f "$WORK_DIR/narration.mp3" ]]; then
   echo "[srt] transcribing narration.mp3 for SRT subtitles"
   "$WHISPER_BIN" "$WORK_DIR/narration.mp3" \
     --model base.en \
