@@ -34,6 +34,13 @@ const templatesPath = join(trackDir, 'cta_templates.json');
 const templates = JSON.parse(readFileSync(templatesPath, 'utf8'));
 
 const client = new ClaudeClient({ apiKey, model, endpoint, authMode, anthropicVersion });
+// Reviewer correction (from commentary_params.correction) is injected into
+// the user payload so Claude can treat it as authoritative ground truth when
+// the previous Phase A misread the video.
+const correction = process.env.COMMENTARY_CORRECTION || null;
+if (correction) {
+  console.log(`[script] reviewer correction provided (${correction.length} chars)`);
+}
 try {
   const script = await buildScript({
     taskId: task.task_id || task.id,
@@ -42,6 +49,7 @@ try {
     // Per-task CTA override (COMMENTARY_CTA_TEMPLATE_ID) — if empty, fall back
     // to rotator via pickCtaTemplate.
     forceCtaId: process.env.COMMENTARY_CTA_TEMPLATE_ID || null,
+    correction,
   });
   writeFileSync(join(workDir, 'script.json'), JSON.stringify(script, null, 2));
   console.log(`[script] OK template=${script.cta.template_id} words=${JSON.stringify(script).length}`);

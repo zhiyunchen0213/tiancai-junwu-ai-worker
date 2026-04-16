@@ -12,6 +12,7 @@
 #   COMMENTARY_LANGUAGE_CODE
 #   COMMENTARY_CTA_TEMPLATE_ID
 #   COMMENTARY_STABILITY
+#   COMMENTARY_CORRECTION     (reviewer-supplied hint for Phase A re-analysis)
 
 if [[ -z "${_TASK_JSON_FILE:-}" || ! -f "${_TASK_JSON_FILE}" ]]; then
   return 0
@@ -63,12 +64,19 @@ if isinstance(cta, str) and cta.strip():
 stab = cp.get("stability")
 if isinstance(stab, (int, float)):
     emit("COMMENTARY_STABILITY", stab)
+
+corr = cp.get("correction")
+if isinstance(corr, str) and corr.strip():
+    emit("COMMENTARY_CORRECTION", corr.strip())
 PY
 )
 
 if [[ -n "$_CP_EXPORTS" ]]; then
   eval "$_CP_EXPORTS"
   echo "[commentary_params] exported: ${COMMENTARY_VOICE:+voice=$COMMENTARY_VOICE }${COMMENTARY_LANGUAGE_CODE:+lang=$COMMENTARY_LANGUAGE_CODE }${COMMENTARY_CTA_TEMPLATE_ID:+cta=$COMMENTARY_CTA_TEMPLATE_ID }${COMMENTARY_STABILITY:+stability=$COMMENTARY_STABILITY}"
+  if [[ -n "${COMMENTARY_CORRECTION:-}" ]]; then
+    echo "[commentary_params] correction provided ($(printf '%s' "$COMMENTARY_CORRECTION" | wc -c | tr -d ' ') chars)"
+  fi
 fi
 
 unset _CP_EXPORTS

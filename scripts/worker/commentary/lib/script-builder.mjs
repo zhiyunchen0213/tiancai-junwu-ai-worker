@@ -37,7 +37,7 @@ function validateShape(script, templates) {
   if (errors.length) throw new Error('script-builder shape error: ' + errors.join('; '));
 }
 
-export async function buildScript({ taskId, scenes, templates, promptPath, claudeClient, forceCtaId = null }) {
+export async function buildScript({ taskId, scenes, templates, promptPath, claudeClient, forceCtaId = null, correction = null }) {
   const systemPrompt = readFileSync(promptPath, 'utf8');
   // forceCtaId (per-task override from commentary_params.cta_template_id) skips
   // the hash-based rotator and locks onto the requested template. If the id is
@@ -64,6 +64,10 @@ export async function buildScript({ taskId, scenes, templates, promptPath, claud
       text: chosenCta.text,
     }],
     instructions: `You MUST use the CTA template with template_id="${chosenCta.id}" exactly as provided in cta_templates_available. Copy its text verbatim into cta.text.`,
+    // reviewer_correction (optional): human reviewer's authoritative hint about
+    // what the previous attempt got wrong. See narration_prompt.md for how to
+    // treat it.
+    ...(correction && String(correction).trim() ? { reviewer_correction: String(correction).trim() } : {}),
   };
 
   let lastErr;
