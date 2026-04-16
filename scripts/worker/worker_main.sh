@@ -353,6 +353,18 @@ run_recovery_check() {
 
         log_info "Resuming task from phase: ${phase_progress:-unknown}"
 
+        # Commentary track has its own pipeline — never resume via run_phase_a.
+        local _rec_track_kind
+        _rec_track_kind=$(get_task_field "$task_file" "track_kind")
+        _rec_track_kind="${_rec_track_kind:-video_gen}"
+        if [[ "$_rec_track_kind" == "commentary" ]]; then
+            log_info "Recovery: commentary task detected; releasing to VPS so poll loop re-claims with commentary dispatch"
+            local completed_c_dir="${SHARED_DIR}/tasks/completed"
+            mkdir -p "$completed_c_dir"
+            mv "$task_file" "$completed_c_dir/$(basename "$task_file")" 2>/dev/null || true
+            continue
+        fi
+
         case "$phase_progress" in
             "phase_a_running"|"")
                 log_info "Resuming Phase A"
@@ -1470,6 +1482,28 @@ process_task() {
     # Phase C (即梦提交) 通过 poll-phase-c 由空闲 worker 认领
     # 这样每台 Mac Mini 不再被审核等待锁死，可连续处理多个 Phase A
 
+    # Dispatch by track_kind — commentary 赛道有自己的 Phase A/C 流程
+    local track_kind
+    track_kind=$(get_task_field "$task_path" "track_kind")
+    track_kind="${track_kind:-video_gen}"
+    if [[ "$track_kind" == "commentary" ]]; then
+        log_info "Dispatching commentary Phase A for $task_id"
+        local commentary_sh="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/commentary/worker_commentary.sh"
+        if "$commentary_sh" "$task_path" phase_a; then
+            log_info "Commentary Phase A done for $task_id — released to VPS"
+        else
+            log_error "Commentary Phase A failed for $task_id"
+            report_event "$task_id" "task_failed" \
+                "{\"error\":\"commentary_phase_a_failed\"}" || true
+        fi
+        # 停止后台心跳
+        [[ -n "$heartbeat_pid" ]] && kill "$heartbeat_pid" 2>/dev/null && wait "$heartbeat_pid" 2>/dev/null
+        local completed_dir="${SHARED_DIR}/tasks/completed"
+        mkdir -p "$completed_dir"
+        mv "$task_path" "$completed_dir/$(basename "$task_path")" 2>/dev/null || true
+        return 0
+    fi
+
     run_phase_a "$task_file"
     local phase_exit=$?
 
@@ -2055,6 +2089,27 @@ with open(sys.argv[2],'w') as f: json.dump(state,f,indent=2)
                     update_task_json "$harvest_path" "jimeng_submit_ids" "$project_id" || true
                 fi
                 log_info "Harvest task ready, will be checked in next harvest cycle"
+                continue
+            fi
+
+            # Dispatch by track_kind — commentary tasks get their own Phase C pipeline
+            pc_track_kind=$(echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(t.get('track_kind') or 'video_gen')" 2>/dev/null || echo "video_gen")
+            if [[ "$pc_track_kind" == "commentary" ]]; then
+                log_info "Claimed Commentary Phase C task from VPS: ${phase_c_id}"
+                tmp_task_file=$(mktemp -t "commentary-${phase_c_id}.XXXXXX.json")
+                echo "$phase_c_resp" | python3 -c "import sys,json; t=json.load(sys.stdin).get('task',{}); print(json.dumps(t,indent=2))" > "$tmp_task_file" 2>/dev/null || echo '{}' > "$tmp_task_file"
+                commentary_sh="${SCRIPTS_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}/commentary/worker_commentary.sh"
+                if "$commentary_sh" "$tmp_task_file" phase_c; then
+                    log_info "Commentary Phase C done for ${phase_c_id}"
+                else
+                    log_error "Commentary Phase C failed for ${phase_c_id}"
+                    curl -sf -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+                        -H "Content-Type: application/json" \
+                        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+                        -d "{\"task_id\":\"${phase_c_id}\",\"event\":\"task_failed\",\"payload\":{\"error\":\"commentary_phase_c_failed\"}}" \
+                        > /dev/null 2>&1 || true
+                fi
+                rm -f "$tmp_task_file"
                 continue
             fi
 
