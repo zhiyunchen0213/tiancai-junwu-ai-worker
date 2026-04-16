@@ -23,9 +23,12 @@ const providerName = process.env.GEMINI_PROVIDER || 'apimart';
 const isLocal = !src.video_url
   || src.video_url.startsWith('uploaded://')
   || src.video_url.startsWith('file://');
+// Reviewer correction (set by export_params.sh from video_metadata.commentary_params.correction)
+// is fed to Gemini so it biases toward the reviewer's interpretation when describing scenes.
+const correction = process.env.COMMENTARY_CORRECTION || null;
 const analyzeArgs = isLocal
-  ? { localPath: src.local_mp4_path, providerName, apiKey, model }
-  : { url: src.video_url, providerName, apiKey, model };
+  ? { localPath: src.local_mp4_path, providerName, apiKey, model, correction }
+  : { url: src.video_url, providerName, apiKey, model, correction };
 
 let lastErr;
 for (let attempt = 0; attempt < 3; attempt++) {

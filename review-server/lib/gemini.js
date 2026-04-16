@@ -238,10 +238,17 @@ Output ONLY the JSON.`;
 /**
  * Extract time-stamped scenes for narration.
  */
-export async function analyzeVideoScenes({ url, localPath, providerName, apiKey, model }) {
+export async function analyzeVideoScenes({ url, localPath, providerName, apiKey, model, correction }) {
   const provider = getProvider(providerName);
   const resolvedModel = model || getDefaultModel(providerName);
   let tmpPath = null;
+
+  // If a reviewer supplied a correction (e.g. "the previous read got the
+  // relationships wrong — they're siblings, not strangers"), append it to the
+  // prompt so Gemini biases toward that interpretation when describing scenes.
+  const promptText = correction && correction.trim()
+    ? `${SCENES_PROMPT}\n\n## Reviewer correction (authoritative)\n\nA human reviewer flagged the previous analysis as wrong. Use this correction as ground truth when describing scenes — don't restate the misread:\n\n${correction.trim()}`
+    : SCENES_PROMPT;
 
   try {
     let parts;
@@ -249,7 +256,7 @@ export async function analyzeVideoScenes({ url, localPath, providerName, apiKey,
       // User-uploaded local file — skip download, read from disk.
       if (supportsFileApi(providerName)) {
         const fileUri = await provider.uploadFile({ apiKey, filePath: localPath, mimeType: 'video/mp4' });
-        parts = [{ fileData: { fileUri, mimeType: 'video/mp4' } }, { text: SCENES_PROMPT }];
+        parts = [{ fileData: { fileUri, mimeType: 'video/mp4' } }, { text: promptText }];
       } else {
         const buf = readFileSync(localPath);
         if (buf.length > 20 * 1024 * 1024) {
@@ -257,20 +264,20 @@ export async function analyzeVideoScenes({ url, localPath, providerName, apiKey,
         }
         parts = [
           { inlineData: { mimeType: 'video/mp4', data: buf.toString('base64') } },
-          { text: SCENES_PROMPT },
+          { text: promptText },
         ];
       }
     } else if (isYouTubeUrl(url)) {
       parts = [
         { fileData: { fileUri: url, mimeType: 'video/mp4' } },
-        { text: SCENES_PROMPT },
+        { text: promptText },
       ];
     } else if (supportsFileApi(providerName)) {
       tmpPath = await downloadVideo(url);
       const fileUri = await provider.uploadFile({ apiKey, filePath: tmpPath, mimeType: 'video/mp4' });
       parts = [
         { fileData: { fileUri, mimeType: 'video/mp4' } },
-        { text: SCENES_PROMPT },
+        { text: promptText },
       ];
     } else {
       tmpPath = await downloadVideo(url);
@@ -280,7 +287,7 @@ export async function analyzeVideoScenes({ url, localPath, providerName, apiKey,
       }
       parts = [
         { inlineData: { mimeType: 'video/mp4', data: buf.toString('base64') } },
-        { text: SCENES_PROMPT },
+        { text: promptText },
       ];
     }
 
