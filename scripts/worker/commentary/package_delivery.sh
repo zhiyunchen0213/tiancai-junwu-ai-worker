@@ -35,14 +35,25 @@ if [[ "$MACKING_HOST" == "localhost" ]]; then
 else
   for attempt in 1 2 3 4 5; do
     if rsync -av --mkpath "$DELIVERY_DIR/" "${MACKING_USER}@${MACKING_HOST}:${REMOTE_DIR}"; then
-      echo "[package] rsync OK"
-      exit 0
+      echo "[package] macking rsync OK"
+      break
     fi
-    echo "[package] rsync attempt $attempt failed"
+    echo "[package] macking rsync attempt $attempt failed"
     sleep $((attempt * 5))
   done
-  echo "[package] rsync FAIL after 5 attempts"
-  exit 1
+fi
+
+# Also upload to VPS so review-server can serve files via /api/commentary/deliveries.
+# Worker → VPS goes through the SSH tunnel (REVIEW_SERVER_URL = localhost:13000 on worker,
+# but scp goes through the reverse tunnel ssh port). Use REVIEW_SERVER_SSH or "brain".
+VPS_SSH="${REVIEW_SERVER_SSH:-brain}"
+VPS_DELIVERY_DIR="~/production/deliveries/$TASK_ID/commentary/"
+echo "[package] uploading to VPS ($VPS_SSH)..."
+if ssh "$VPS_SSH" "mkdir -p $VPS_DELIVERY_DIR" 2>/dev/null && \
+   scp -q "$DELIVERY_DIR"/* "${VPS_SSH}:${VPS_DELIVERY_DIR}" 2>/dev/null; then
+  echo "[package] VPS upload OK"
+else
+  echo "[package] VPS upload failed (non-fatal, files stay on worker)" >&2
 fi
 
 echo "[package] delivered"
