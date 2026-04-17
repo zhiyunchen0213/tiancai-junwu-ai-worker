@@ -70,6 +70,43 @@ else
   "$WORKER_ROOT/download_and_extract.sh" "$VIDEO_URL" "$WORK_DIR"
 fi
 
+# 当前 analysis_chat provider (apimart Gemini) 走 inline 上传，硬上限 20MB。
+# 超限就在 worker 端用 Mac 硬件 H.264 编码器降到 ~15MB。video_gen 走 Kimi 没这个限制。
+ORIGINAL_BYTES=$(wc -c < "$WORK_DIR/original.mp4" | tr -d ' ')
+ORIGINAL_MB=$(( ORIGINAL_BYTES / 1024 / 1024 ))
+echo "[phase_a] original.mp4 size: ${ORIGINAL_MB}MB"
+
+if (( ORIGINAL_BYTES > 18 * 1024 * 1024 )); then
+  echo "[phase_a] >18MB → transcoding via h264_videotoolbox (target ~15MB)"
+  DURATION=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$WORK_DIR/original.mp4" 2>/dev/null || echo "")
+  if [[ -z "$DURATION" ]] || [[ "$DURATION" == "N/A" ]]; then
+    echo "[phase_a] ffprobe failed to read duration; aborting" >&2
+    exit 1
+  fi
+  # 15MB = 120000 kbit·s 总预算，扣 128 kbps 给音频；clamp 300-3000 kbps 防极端
+  TARGET_VIDEO_KBPS=$(python3 -c "v = int(120000 / float('$DURATION') - 128); print(max(300, min(3000, v)))")
+  echo "[phase_a] duration=${DURATION}s → target video ${TARGET_VIDEO_KBPS}kbps"
+
+  if ffmpeg -hide_banner -loglevel warning -y \
+      -i "$WORK_DIR/original.mp4" \
+      -c:v h264_videotoolbox -b:v "${TARGET_VIDEO_KBPS}k" \
+      -c:a aac -b:a 128k \
+      -movflags +faststart \
+      "$WORK_DIR/original.transcoded.mp4"; then
+    NEW_BYTES=$(wc -c < "$WORK_DIR/original.transcoded.mp4" | tr -d ' ')
+    NEW_MB=$(( NEW_BYTES / 1024 / 1024 ))
+    if (( NEW_BYTES > 19 * 1024 * 1024 )); then
+      echo "[phase_a] transcoded still ${NEW_MB}MB (>19MB safety cap); aborting" >&2
+      exit 1
+    fi
+    mv "$WORK_DIR/original.transcoded.mp4" "$WORK_DIR/original.mp4"
+    echo "[phase_a] transcoded ${ORIGINAL_MB}MB → ${NEW_MB}MB"
+  else
+    echo "[phase_a] ffmpeg transcode failed" >&2
+    exit 1
+  fi
+fi
+
 cat > "$WORK_DIR/source.json" <<EOF
 {
   "video_url": "${VIDEO_URL}",
