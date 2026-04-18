@@ -196,16 +196,22 @@ report_event() {
         _tmp="/tmp/report_$$_${RANDOM}.json"
         printf '%s' "$payload" > "$_tmp" 2>/dev/null || printf '{}' > "$_tmp"
 
-        # 用 Python 安全构建 body（处理嵌套 JSON 转义）
-        _body=$(python3 -c "
-import json, sys
+        # Python 通过 env 拿到 task_id/event/tmp 路径，而不是 bash 直接拼源码——
+        # 之前用 f-string + $(cat ...) 把 JSON 字面量注入到源码里，JSON 的 `{}:` 会
+        # 跟 f-string 自身的 `{}:` 撞（Python 报 SyntaxError: single '}' is not allowed），
+        # 触发 task_created 事件 5 次重试全失败.
+        _body=$(TASK_ID="$task_id" EVENT="$event" TMP_FILE="$_tmp" python3 -c '
+import json, os, sys
 try:
-    with open('$_tmp') as f: p = json.loads(f.read())
+    with open(os.environ["TMP_FILE"]) as f:
+        p = json.loads(f.read())
 except Exception as e:
-    print(f'[report] WARNING: JSON parse failed: {e}, payload was: $(cat "$_tmp" 2>/dev/null | head -c 200)', file=sys.stderr)
+    with open(os.environ["TMP_FILE"]) as f:
+        preview = f.read(200)
+    print("[report] WARNING: JSON parse failed: " + str(e) + ", payload was: " + preview, file=sys.stderr)
     p = {}
-print(json.dumps({'task_id':'$task_id','event':'$event','payload':p}))
-" 2>&1)
+print(json.dumps({"task_id": os.environ["TASK_ID"], "event": os.environ["EVENT"], "payload": p}))
+' 2>&1)
         rm -f "$_tmp"
 
         # 如果 python 输出包含 WARNING，打印到 stderr 但继续（body 是最后一行）
