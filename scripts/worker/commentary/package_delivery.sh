@@ -3,6 +3,11 @@
 
 set -euo pipefail
 
+# .production.env 里 REVIEW_SERVER_URL/DISPATCHER_TOKEN/MACKING_* 都不带 export，
+# 所以从 phase_c.sh `bash 子进程`调进来时拿不到——必须自己 source 一遍。
+[[ -f ~/.production.env ]] && source ~/.production.env
+[[ -f ~/.dev-worker.env ]] && source ~/.dev-worker.env
+
 TASK_ID="$1"
 WORK_DIR="$2"
 
