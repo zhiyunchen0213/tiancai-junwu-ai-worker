@@ -26,7 +26,9 @@ fi
 report_event() {
     [[ -z "$REVIEW_SERVER_URL" ]] && return 0
     [[ -z "$DISPATCHER_TOKEN" ]] && return 0
-    local task_id="$1" event="$2" payload="${3:-{}}"
+    local task_id="$1" event="$2" payload
+    # bash 3.2 (macOS /bin/bash) 把 ${3:-{}} 解析成 ${3:-{} + 字面量 }，$3 非空时尾部会多一个 }。
+    if [[ -z "${3:-}" ]]; then payload='{}'; else payload="$3"; fi
     (
         TASK_ID="$task_id" EVENT="$event" PAYLOAD="$payload" \
         REVIEW_URL="$REVIEW_SERVER_URL" DTOK="$DISPATCHER_TOKEN" \

@@ -185,7 +185,10 @@ report_event() {
 
     local task_id="$1"
     local event="$2"
-    local payload="${3:-{}}"
+    # bash 3.2 (macOS /bin/bash) 把 ${3:-{}} 解析成 ${3:-{} + 字面量 }，
+    # $3 非空时会在尾部多塞一个 }。换显式 if 避开。
+    local payload
+    if [[ -z "${3:-}" ]]; then payload='{}'; else payload="$3"; fi
 
     # task_failed 同步执行（确保错误信息可靠送达），其他事件后台执行
     local _run_sync=0
