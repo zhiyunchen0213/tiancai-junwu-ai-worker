@@ -440,7 +440,49 @@ run_recovery_check() {
 # 背景：commit a7bf2ec 后 Phase A worker 完成即释放任务，Harvest 由其他 worker
 # 执行，Harvest worker 的 work_dir 里没有 original.mp4。所以必须在 Phase A
 # 下载完成时立即把原视频上传到 VPS。
-# 失败只 warn，不阻塞 Phase A（原视频是交付增强，不是关键路径）。
+# 失败进 retry 队列，main loop idle 时 sweep 重传 — 2026-04-19 修（之前只
+# log_warn 放过，导致 ~25% 任务 zip 里缺原视频）。
+SOURCE_UPLOAD_QUEUE="${SHARED_DIR}/pending_source_uploads"
+SOURCE_UPLOAD_MAX_ATTEMPTS=10
+
+upload_source_video_once() {
+    # 内部函数: 执行一次实际 curl 上传. 返回 0=成功, 非 0=失败.
+    local task_id="$1"
+    local src_file="$2"
+    local url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/upload-source-video"
+    # --max-time 600 = 10 分钟. 大文件 (40+MB) 走反向隧道+cloudflared 可能慢,
+    # 之前 180s 对大视频不够. 不再用 --retry (外层 sweep 循环自己管重试).
+    curl -sf -X POST \
+        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+        -H "Content-Type: application/octet-stream" \
+        --data-binary "@${src_file}" \
+        --max-time 600 \
+        "$url" > /dev/null 2>&1
+}
+
+enqueue_source_upload_retry() {
+    local task_id="$1"
+    local src_file="$2"
+    mkdir -p "$SOURCE_UPLOAD_QUEUE"
+    local queue_file="$SOURCE_UPLOAD_QUEUE/${task_id}.txt"
+    local attempts=0
+    if [[ -f "$queue_file" ]]; then
+        attempts=$(awk -F= '/^attempts=/ {print $2}' "$queue_file")
+        attempts=${attempts:-0}
+    fi
+    cat > "$queue_file" <<EOF
+task_id=${task_id}
+src_file=${src_file}
+attempts=${attempts}
+last_try=$(date +%s)
+EOF
+}
+
+dequeue_source_upload() {
+    local task_id="$1"
+    rm -f "$SOURCE_UPLOAD_QUEUE/${task_id}.txt" 2>/dev/null || true
+}
+
 upload_source_video() {
     local task_id="$1"
     local src_file="$2"
@@ -457,18 +499,56 @@ upload_source_video() {
         return 0
     fi
 
-    local url="${REVIEW_SERVER_URL}/api/v1/tasks/${task_id}/upload-source-video"
-    if curl -sf -X POST \
-        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
-        -H "Content-Type: application/octet-stream" \
-        --data-binary "@${src_file}" \
-        --max-time 180 --retry 2 --retry-delay 3 --retry-max-time 180 \
-        "$url" > /dev/null 2>&1; then
+    if upload_source_video_once "$task_id" "$src_file"; then
         log_info "[PhaseA] $task_id: source video uploaded (${size} bytes)"
+        dequeue_source_upload "$task_id"
     else
-        log_warn "[PhaseA] $task_id: source video upload failed (non-fatal)"
+        log_warn "[PhaseA] $task_id: source video upload failed, queued for retry"
+        enqueue_source_upload_retry "$task_id" "$src_file"
     fi
     return 0
+}
+
+sweep_pending_source_uploads() {
+    # idle 时调用: 扫 pending 队列, 尝试重传每个条目.
+    [[ -d "$SOURCE_UPLOAD_QUEUE" ]] || return 0
+    local any=0
+    for queue_file in "$SOURCE_UPLOAD_QUEUE"/*.txt; do
+        [[ -f "$queue_file" ]] || continue
+        any=1
+        local task_id src_file attempts
+        task_id=$(awk -F= '/^task_id=/ {print $2}' "$queue_file")
+        src_file=$(awk -F= '/^src_file=/ {sub(/^src_file=/,""); print; exit}' "$queue_file")
+        attempts=$(awk -F= '/^attempts=/ {print $2}' "$queue_file")
+        attempts=${attempts:-0}
+
+        if [[ ! -f "$src_file" ]]; then
+            log_warn "[Sweep] $task_id: src file gone ($src_file), dropping from queue (too late to recover)"
+            dequeue_source_upload "$task_id"
+            continue
+        fi
+        if (( attempts >= SOURCE_UPLOAD_MAX_ATTEMPTS )); then
+            log_warn "[Sweep] $task_id: exceeded $SOURCE_UPLOAD_MAX_ATTEMPTS attempts, giving up"
+            dequeue_source_upload "$task_id"
+            continue
+        fi
+
+        attempts=$((attempts + 1))
+        log_info "[Sweep] $task_id: retry source upload (attempt $attempts/$SOURCE_UPLOAD_MAX_ATTEMPTS)"
+        if upload_source_video_once "$task_id" "$src_file"; then
+            log_info "[Sweep] $task_id: source upload succeeded"
+            dequeue_source_upload "$task_id"
+        else
+            # 写回更新的 attempts 计数
+            cat > "$queue_file" <<EOF
+task_id=${task_id}
+src_file=${src_file}
+attempts=${attempts}
+last_try=$(date +%s)
+EOF
+        fi
+    done
+    [[ $any -eq 1 ]] || return 0
 }
 
 # Phase A: 下载、转录、分析视频 (Download, transcribe, analyze video)
@@ -2281,6 +2361,10 @@ PHASE_C_REFS_PYEOF
         ((idle_count++)) || true
         if [[ $((idle_count % IDLE_LOG_INTERVAL)) -eq 0 ]]; then
             log_info "No pending tasks (idle for ~$((idle_count * POLL_INTERVAL))s)"
+        fi
+        # 每 10 次 idle 轮询扫一次待重传的原视频 (约 5 分钟 @ POLL_INTERVAL=30s)
+        if (( idle_count % 10 == 0 )); then
+            sweep_pending_source_uploads || true
         fi
         # 心跳上报
         if [[ -n "$REVIEW_SERVER_URL" ]]; then
