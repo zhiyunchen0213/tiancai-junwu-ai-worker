@@ -145,14 +145,26 @@ resolve_cookie_args() {
         return
     fi
 
-    # 2. 实时从 Safari binarycookies 提取
+    # 2. macking 同步过来的 Netscape cookie 文件 (2026-04-21 起的新路径).
+    # macking 端 refresh-youtube-cookie.sh 用 Chrome 导出, sync-cookies-to-workers.sh 每 5min 推到这里.
+    # 纯文本不受 macOS 沙盒 TCC 挡, 比 Safari binarycookies 稳.
+    # 目前只 YouTube 有这个 synced 文件; 其他平台继续走 Safari fallback.
+    if [[ "$platform" == "youtube" ]]; then
+        local synced="$HOME/.cache/worker-cookies/youtube.cookies.txt"
+        if [[ -s "$synced" ]]; then
+            echo "--cookies $synced"
+            return
+        fi
+    fi
+
+    # 3. 实时从 Safari binarycookies 提取 (其他平台主路径)
     local cookie_file
     if cookie_file=$(extract_safari_cookies "$platform" 2>/dev/null); then
         echo "--cookies $cookie_file"
         return
     fi
 
-    # 3. 兜底: yt-dlp 自己尝试读浏览器
+    # 4. 兜底: yt-dlp 自己尝试读浏览器
     echo "--cookies-from-browser safari"
 }
 
@@ -238,27 +250,43 @@ export PATH=/opt/homebrew/bin:\$PATH
 $remote_proxy_env
 mkdir -p $remote_dir
 SCRIPTS=\$HOME/worker-code/scripts/worker
+PLATFORM='$PLATFORM'
 
-# 提取 Safari cookie
-SAFARI_BIN=''
-for p in \"\$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies\" \"\$HOME/Library/Cookies/Cookies.binarycookies\"; do
-    [ -f \"\$p\" ] && SAFARI_BIN=\"\$p\" && break
-done
+# Cookie 获取: YouTube 优先用 refresh 脚本刚导出的 Netscape 文件 (2026-04-21 之后),
+# 其他平台继续走 Safari binarycookies 提取.
 CK_FILE=''
-if [ -n \"\$SAFARI_BIN\" ] && [ -f \"\$SCRIPTS/safari_cookies_export.py\" ]; then
-    CK_TMP=\"/tmp/mck_dl_\${RANDOM}\"
-    cp \"\$SAFARI_BIN\" \"\${CK_TMP}.bin\" 2>/dev/null
-    python3 \"\$SCRIPTS/safari_cookies_export.py\" \"\${CK_TMP}.bin\" \"\${CK_TMP}.txt\" 2>/dev/null
-    rm -f \"\${CK_TMP}.bin\"
-    [ -s \"\${CK_TMP}.txt\" ] && CK_FILE=\"\${CK_TMP}.txt\"
+CHROME_COOKIES=\"\$HOME/production/shared/cookies/youtube.cookies.txt\"
+if [ \"\$PLATFORM\" = 'youtube' ] && [ -s \"\$CHROME_COOKIES\" ]; then
+    CK_FILE=\"\$CHROME_COOKIES\"
+fi
+
+if [ -z \"\$CK_FILE\" ]; then
+    SAFARI_BIN=''
+    for p in \"\$HOME/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies\" \"\$HOME/Library/Cookies/Cookies.binarycookies\"; do
+        [ -f \"\$p\" ] && SAFARI_BIN=\"\$p\" && break
+    done
+    if [ -n \"\$SAFARI_BIN\" ] && [ -f \"\$SCRIPTS/safari_cookies_export.py\" ]; then
+        CK_TMP=\"/tmp/mck_dl_\${RANDOM}\"
+        cp \"\$SAFARI_BIN\" \"\${CK_TMP}.bin\" 2>/dev/null
+        python3 \"\$SCRIPTS/safari_cookies_export.py\" \"\${CK_TMP}.bin\" \"\${CK_TMP}.txt\" 2>/dev/null
+        rm -f \"\${CK_TMP}.bin\"
+        [ -s \"\${CK_TMP}.txt\" ] && CK_FILE=\"\${CK_TMP}.txt\"
+    fi
 fi
 
 # 尝试 1: yt-dlp (用 = 连接 --cookies=FILE，避免 zsh 不做 word splitting)
 CK_ARGS=''
 [ -n \"\$CK_FILE\" ] && CK_ARGS=\"--cookies=\$CK_FILE\"
+# Cleanup 只删 /tmp 临时文件, persistent Chrome cookie (\$HOME/production/...) 留着
+cleanup_ck() {
+    case \"\$CK_FILE\" in
+        /tmp/*) rm -f \"\$CK_FILE\" ;;
+    esac
+}
+
 echo \"[下载器] yt-dlp (cookie: \$CK_ARGS)\"
 if yt-dlp \$CK_ARGS --merge-output-format mp4 -o '$remote_dir/video.%(ext)s' '$URL' 2>&1; then
-    rm -f \"\$CK_FILE\"
+    cleanup_ck
     ls $remote_dir/*.mp4
     exit 0
 fi
@@ -270,13 +298,13 @@ if command -v lux >/dev/null 2>&1; then
         # lux 文件名可能带后缀，找到 mp4
         F=\$(ls $remote_dir/video.* 2>/dev/null | head -1)
         [ -n \"\$F\" ] && [ \"\$F\" != '$remote_dir/video.mp4' ] && mv \"\$F\" '$remote_dir/video.mp4'
-        rm -f \"\$CK_FILE\"
+        cleanup_ck
         ls $remote_dir/*.mp4
         exit 0
     fi
 fi
 
-rm -f \"\$CK_FILE\"
+cleanup_ck
 exit 1
 "
     if ssh -o StrictHostKeyChecking=no "$MACKING_USER@$MACKING_HOST" "$REMOTE_SCRIPT" \
