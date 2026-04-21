@@ -192,10 +192,14 @@ MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
 MACKING_USER="${MACKING_USER:-zjw-mini}"
 
 # 国内平台需要绕过系统代理 (Clash 等)
-PROXY_ENV=""
-case "$PLATFORM" in
-    douyin|bilibili) PROXY_ENV='no_proxy="*" http_proxy="" https_proxy=""' ;;
-esac
+# 所有平台都绕系统代理. 2026-04-21 实测: 国内平台本来就需要直连; YouTube 等海外
+# 平台走 Clash 系统代理反而触发 MITM, Python urllib TLS 指纹被 YouTube reject
+# (curl 直连 200 OK 但 yt-dlp SSL EOF 的根因). 东莞直连 YouTube 能通, 先默认直连;
+# 如将来 GFW 变化需要代理, 通过环境变量 DOWNLOAD_USE_PROXY=1 单独开.
+PROXY_ENV='no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
+    PROXY_ENV=''
+fi
 
 # ── 本机下载函数 ──
 try_download_local() {
@@ -238,12 +242,13 @@ try_download_macking() {
     echo "通过 macking ($MACKING_HOST) 代理下载..."
     local remote_dir="/tmp/yt-dl-$$-${RANDOM}"
 
-    # 在 macking 上执行: Safari cookie 提取 → yt-dlp → lux fallback
-    # 国内平台绕过系统代理 (macking 上 Clash 走 7890)
-    local remote_proxy_env=""
-    case "$PLATFORM" in
-        douyin|bilibili) remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy=""' ;;
-    esac
+    # 在 macking 上执行: cookie 提取 → yt-dlp → lux fallback
+    # 绕过系统代理: macking 上 ClashX Pro 监听 7890 会 MITM 拦截 Python urllib,
+    # yt-dlp 直连能过. DOWNLOAD_USE_PROXY=1 可强制走代理 (GFW 重新严打时).
+    local remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+    if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
+        remote_proxy_env=''
+    fi
 
     REMOTE_SCRIPT="
 export PATH=/opt/homebrew/bin:\$PATH
