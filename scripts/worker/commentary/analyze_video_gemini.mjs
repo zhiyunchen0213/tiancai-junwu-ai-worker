@@ -14,6 +14,14 @@ const sourcePath = join(workDir, 'source.json');
 if (!existsSync(sourcePath)) { console.error(`Missing ${sourcePath}`); process.exit(2); }
 const src = JSON.parse(readFileSync(sourcePath, 'utf8'));
 
+// Read task.json to determine pov_mode (copied to workDir by phase_a.sh).
+const taskPath = join(workDir, 'task.json');
+const task = existsSync(taskPath) ? JSON.parse(readFileSync(taskPath, 'utf8')) : {};
+const povMode = task?.video_metadata?.commentary_params?.pov_mode
+             || task?.commentary_params?.pov_mode
+             || 'third_person';
+const identifyCharacters = povMode === 'first_person';
+
 const apiKey = process.env.GEMINI_API_KEY;
 if (!apiKey) { console.error('GEMINI_API_KEY not set'); process.exit(2); }
 const model = process.env.GEMINI_VIDEO_MODEL || 'gemini-3-flash-preview-nothinking';
@@ -27,8 +35,8 @@ const isLocal = !src.video_url
 // is fed to Gemini so it biases toward the reviewer's interpretation when describing scenes.
 const correction = process.env.COMMENTARY_CORRECTION || null;
 const analyzeArgs = isLocal
-  ? { localPath: src.local_mp4_path, providerName, apiKey, model, correction }
-  : { url: src.video_url, providerName, apiKey, model, correction };
+  ? { localPath: src.local_mp4_path, providerName, apiKey, model, correction, identifyCharacters }
+  : { url: src.video_url, providerName, apiKey, model, correction, identifyCharacters };
 
 let lastErr;
 for (let attempt = 0; attempt < 3; attempt++) {

@@ -29,7 +29,14 @@ const anthropicVersion = process.env.ANTHROPIC_VERSION || '2023-06-01';
 const trackDir = process.env.SKILLS_DIR
   ? join(process.env.SKILLS_DIR, 'tracks/commentary')
   : join(__dirname, '../../../skills/tracks/commentary');
-const promptPath = join(trackDir, 'narration_prompt.md');
+// pov 配置 — task 对象由 worker_commentary.sh 从 VPS 拉下来
+const povMode = task?.video_metadata?.commentary_params?.pov_mode || 'third_person';
+const protagonist = task?.pov_details?.protagonist || null;
+const selectedVoiceId = task?.pov_details?.selected_voice_id || null;
+
+// 根据 pov_mode 选 prompt 文件
+const promptFile = povMode === 'first_person' ? 'narration_prompt_1p.md' : 'narration_prompt.md';
+const promptPath = join(trackDir, promptFile);
 const templatesPath = join(trackDir, 'cta_templates.json');
 const templates = JSON.parse(readFileSync(templatesPath, 'utf8'));
 
@@ -42,6 +49,7 @@ if (correction) {
   console.log(`[script] reviewer correction provided (${correction.length} chars)`);
 }
 try {
+  console.log(`[script] pov_mode=${povMode} protagonist=${protagonist?.name || 'none'} voice=${selectedVoiceId || 'default'}`);
   const script = await buildScript({
     taskId: task.task_id || task.id,
     scenes, templates, promptPath,
@@ -50,6 +58,9 @@ try {
     // to rotator via pickCtaTemplate.
     forceCtaId: process.env.COMMENTARY_CTA_TEMPLATE_ID || null,
     correction,
+    povMode,
+    protagonist,
+    selectedVoiceId,
   });
   writeFileSync(join(workDir, 'script.json'), JSON.stringify(script, null, 2));
   console.log(`[script] OK template=${script.cta.template_id} words=${JSON.stringify(script).length}`);

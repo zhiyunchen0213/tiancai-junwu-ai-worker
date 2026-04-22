@@ -20,7 +20,7 @@
 //   COMMENTARY_LANGUAGE_CODE (Kie language hint)
 //   COMMENTARY_TTS_TIMEOUT_SEC (default 600)
 
-import { readFileSync, writeFileSync, createWriteStream } from 'fs';
+import { readFileSync, writeFileSync, createWriteStream, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { pipeline } from 'stream/promises';
@@ -34,6 +34,15 @@ const provider = (process.env.COMMENTARY_TTS_PROVIDER || 'kie').toLowerCase();
 const totalTimeoutMs = (parseInt(process.env.COMMENTARY_TTS_TIMEOUT_SEC || '600', 10) || 600) * 1000;
 
 const script = JSON.parse(readFileSync(join(workDir, 'script.json'), 'utf8'));
+const taskJsonPath = join(workDir, 'task.json');
+const task = existsSync(taskJsonPath) ? JSON.parse(readFileSync(taskJsonPath, 'utf8')) : {};
+
+// voice_id 优先级：script.protagonist.voice_id (第一视角 Task 7 填) > env > commentary_params.voice (第三人称) > Brian
+const voiceId = script?.protagonist?.voice_id
+             || process.env.COMMENTARY_TTS_VOICE_ID
+             || task?.video_metadata?.commentary_params?.voice
+             || 'Brian';
+console.log(`[tts] voice_id=${voiceId}`);
 
 const trackDir = process.env.SKILLS_DIR
   ? join(process.env.SKILLS_DIR, 'tracks/commentary')
@@ -108,10 +117,8 @@ async function runKie() {
   if (!apiKey) { console.error('KIE_API_KEY or ELEVENLABS_API_KEY not set'); process.exit(2); }
   const kieBase = (process.env.KIE_API_URL || 'https://api.kie.ai').replace(/\/+$/, '');
 
-  const voiceId = process.env.COMMENTARY_VOICE
-    || process.env.ELEVENLABS_VOICE_ID
-    || (track.tts && track.tts.voice_id)
-    || 'Brian';
+  // voiceId resolved above (priority chain: protagonist.voice_id > env > commentary_params.voice > Brian)
+  // track.tts.voice_id / COMMENTARY_VOICE / ELEVENLABS_VOICE_ID are subsumed by the shared chain above.
   const stability = resolveStability();
   const languageCode = (process.env.COMMENTARY_LANGUAGE_CODE || '').trim();
 
@@ -222,9 +229,8 @@ async function runMiniMax() {
   const base = (process.env.MINIMAX_API_URL || 'https://api.minimaxi.com').replace(/\/+$/, '');
   const model = process.env.MINIMAX_MODEL || 'speech-2.8-hd';
 
-  const voiceId = process.env.COMMENTARY_VOICE
-    || (track.tts && track.tts.minimax_voice_id)
-    || 'English_Graceful_Lady';
+  // voiceId resolved above (priority chain: protagonist.voice_id > env > commentary_params.voice > Brian)
+  // track.tts.minimax_voice_id / COMMENTARY_VOICE are subsumed by the shared chain above.
 
   async function createTask() {
     const url = `${base}/v1/t2a_async_v2`;

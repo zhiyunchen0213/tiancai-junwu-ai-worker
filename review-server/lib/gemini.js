@@ -236,7 +236,7 @@ export async function analyzeImage({ url, providerName, apiKey, model, feedback 
   return { result: parsed, model: usedModel, tokenUsage };
 }
 
-const SCENES_PROMPT = `You are a video analyst. Watch the video and extract a chronological list of scenes with wall-clock timestamps.
+const SCENES_PROMPT_BASE = `You are a video analyst. Watch the video and extract a chronological list of scenes with wall-clock timestamps.
 
 Output a pure JSON object with this exact shape (no markdown, no prose):
 
@@ -256,20 +256,78 @@ Rules:
 
 Output ONLY the JSON.`;
 
+const CHARACTER_ID_PROMPT_BLOCK = `
+In addition to scenes, identify up to 5 candidate NARRATIVE PROTAGONISTS — characters whose perspective could be used for a first-person commentary script.
+
+For each candidate, include:
+- name (English or transliteration, avoid Chinese)
+- gender: "male" | "female" | "neutral"
+- age_band: "<30" | "30-49" | "50+"
+- appearance: one short sentence (clothing, ethnicity, hair, notable features)
+- role_tagline: one short Chinese sentence describing their story role (e.g., "酒吧门口撞人的男主")
+- emotion_arc: short arrow chain in Chinese (e.g., "愤怒 → 后悔 → 释然")
+- recommended_protagonist: true for exactly ONE candidate (the strongest narrative carrier)
+
+Also set:
+- no_clear_protagonist: true if the video has no clear narrative protagonist (e.g., pure landscape, animal-only, object display). When true, character_candidates MUST be [].
+
+Add these to the output JSON as top-level fields alongside scenes. The extended JSON shape is:
+
+{
+  "video_duration_sec": <float>,
+  "scenes": [ ... ],
+  "character_candidates": [
+    {
+      "name": "<string>",
+      "gender": "male" | "female" | "neutral",
+      "age_band": "<30" | "30-49" | "50+",
+      "appearance": "<one sentence>",
+      "role_tagline": "<一句中文>",
+      "emotion_arc": "<情绪链>",
+      "recommended_protagonist": true | false
+    }
+  ],
+  "no_clear_protagonist": true | false
+}`;
+
+// Build the full SCENES_PROMPT with optional character identification block
+function buildScenesPrompt({ identifyCharacters = false } = {}) {
+  if (identifyCharacters) {
+    return SCENES_PROMPT_BASE + '\n' + CHARACTER_ID_PROMPT_BLOCK;
+  }
+  return SCENES_PROMPT_BASE;
+}
+
+// Keep backward-compatible alias
+const SCENES_PROMPT = SCENES_PROMPT_BASE;
+
 /**
  * Extract time-stamped scenes for narration.
+ * @param {object} opts
+ * @param {string} [opts.url]
+ * @param {string} [opts.localPath]
+ * @param {string} opts.providerName
+ * @param {string} opts.apiKey
+ * @param {string} [opts.model]
+ * @param {string} [opts.correction]
+ * @param {boolean} [opts.identifyCharacters=false] — when true, appends character protagonist
+ *   identification instructions to the prompt and parses character_candidates /
+ *   no_clear_protagonist from the response.
  */
-export async function analyzeVideoScenes({ url, localPath, providerName, apiKey, model, correction }) {
+export async function analyzeVideoScenes({ url, localPath, providerName, apiKey, model, correction, identifyCharacters = false }) {
   const provider = getProvider(providerName);
   const resolvedModel = model || getDefaultModel(providerName);
   let tmpPath = null;
+
+  // Build the base prompt, optionally with character identification instructions.
+  const basePrompt = buildScenesPrompt({ identifyCharacters });
 
   // If a reviewer supplied a correction (e.g. "the previous read got the
   // relationships wrong — they're siblings, not strangers"), append it to the
   // prompt so Gemini biases toward that interpretation when describing scenes.
   const promptText = correction && correction.trim()
-    ? `${SCENES_PROMPT}\n\n## Reviewer correction (authoritative)\n\nA human reviewer flagged the previous analysis as wrong. Use this correction as ground truth when describing scenes — don't restate the misread:\n\n${correction.trim()}`
-    : SCENES_PROMPT;
+    ? `${basePrompt}\n\n## Reviewer correction (authoritative)\n\nA human reviewer flagged the previous analysis as wrong. Use this correction as ground truth when describing scenes — don't restate the misread:\n\n${correction.trim()}`
+    : basePrompt;
 
   try {
     let parts;
@@ -336,12 +394,25 @@ export async function analyzeVideoScenes({ url, localPath, providerName, apiKey,
       throw new Error('Gemini scenes parse error: scenes array missing or empty');
     }
 
-    return {
+    const result = {
       video_duration_sec: Number(parsed.video_duration_sec) || 0,
       scenes: parsed.scenes,
       model: usedModel,
       tokenUsage,
     };
+
+    // Attach character identification fields when requested (or when Gemini
+    // spontaneously includes them, as a defensive measure).
+    if (identifyCharacters || parsed.character_candidates !== undefined) {
+      result.character_candidates = Array.isArray(parsed.character_candidates)
+        ? parsed.character_candidates
+        : [];
+      result.no_clear_protagonist = typeof parsed.no_clear_protagonist === 'boolean'
+        ? parsed.no_clear_protagonist
+        : false;
+    }
+
+    return result;
   } finally {
     cleanupTmp(tmpPath);
   }
