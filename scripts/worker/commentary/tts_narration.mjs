@@ -37,10 +37,22 @@ const script = JSON.parse(readFileSync(join(workDir, 'script.json'), 'utf8'));
 const taskJsonPath = join(workDir, 'task.json');
 const task = existsSync(taskJsonPath) ? JSON.parse(readFileSync(taskJsonPath, 'utf8')) : {};
 
-// voice_id 优先级：script.protagonist.voice_id (第一视角 Task 7 填) > env > commentary_params.voice (第三人称) > Brian
+// task.video_metadata 在 queue JSON 里是字符串, api/v1/tasks 响应里是对象 — 统一解析.
+let taskCp = {};
+if (task?.video_metadata) {
+  const vm = task.video_metadata;
+  try {
+    const parsed = typeof vm === 'string' ? JSON.parse(vm) : vm;
+    taskCp = parsed?.commentary_params || {};
+  } catch { /* leave taskCp as {} */ }
+}
+
+// voice_id 优先级：script.protagonist.voice_id (第一视角 Task 7 填) > env > commentary_params.voice > Brian
+// env 名优先 COMMENTARY_TTS_VOICE_ID (新), 兼容 COMMENTARY_VOICE (export_params.sh 现行名).
 const voiceId = script?.protagonist?.voice_id
              || process.env.COMMENTARY_TTS_VOICE_ID
-             || task?.video_metadata?.commentary_params?.voice
+             || process.env.COMMENTARY_VOICE
+             || taskCp.voice
              || 'Brian';
 console.log(`[tts] voice_id=${voiceId}`);
 
