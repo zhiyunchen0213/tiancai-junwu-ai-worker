@@ -254,7 +254,7 @@ async function runMiniMax() {
       // bitrate 全给单声道, 采样率拉到 CD 级, 高频细节恢复.
       language_boost: 'English',
       voice_setting: { voice_id: voiceId, speed: 1, vol: 10, pitch: 0 },
-      audio_setting: { audio_sample_rate: 44100, bitrate: 192000, format: 'mp3', channel: 1 },
+      audio_setting: { audio_sample_rate: 44100, bitrate: 128000, format: 'mp3', channel: 1 },
     };
 
     let lastErr;
