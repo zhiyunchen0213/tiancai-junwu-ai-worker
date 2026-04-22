@@ -249,9 +249,12 @@ async function runMiniMax() {
     const body = {
       model,
       text: fullText,
-      language_boost: 'auto',
+      // 2026-04-23: 单人 narration 提升清晰度 — mono 44.1kHz 192kbps.
+      // 32kHz stereo 128k 等于每声道 64k, 人声齿音 (4-8kHz) 易糊; 改 mono 把
+      // bitrate 全给单声道, 采样率拉到 CD 级, 高频细节恢复.
+      language_boost: 'English',
       voice_setting: { voice_id: voiceId, speed: 1, vol: 10, pitch: 0 },
-      audio_setting: { audio_sample_rate: 32000, bitrate: 128000, format: 'mp3', channel: 2 },
+      audio_setting: { audio_sample_rate: 44100, bitrate: 192000, format: 'mp3', channel: 1 },
     };
 
     let lastErr;
