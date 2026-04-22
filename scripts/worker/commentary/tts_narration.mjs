@@ -249,12 +249,13 @@ async function runMiniMax() {
     const body = {
       model,
       text: fullText,
-      // 2026-04-23: 单人 narration 提升清晰度 — mono 44.1kHz 192kbps.
-      // 32kHz stereo 128k 等于每声道 64k, 人声齿音 (4-8kHz) 易糊; 改 mono 把
-      // bitrate 全给单声道, 采样率拉到 CD 级, 高频细节恢复.
+      // 2026-04-23: 接入 emotion + voice_modify 消除"广播感 / 电音".
+      // 参数源自用户在 MiniMax 控制台试出的满意组合 (vol=1, emotion=fluent,
+      // voice_modify pitch/intensity/timbre). stereo 44.1k 256k 给最宽动态.
       language_boost: 'English',
-      voice_setting: { voice_id: voiceId, speed: 1, vol: 10, pitch: 0 },
-      audio_setting: { audio_sample_rate: 44100, bitrate: 128000, format: 'mp3', channel: 1 },
+      voice_setting: { voice_id: voiceId, speed: 1, vol: 1, pitch: 0, emotion: 'fluent' },
+      audio_setting: { audio_sample_rate: 44100, bitrate: 256000, format: 'mp3', channel: 2 },
+      voice_modify: { pitch: 25, intensity: 17, timbre: 21 },
     };
 
     let lastErr;
