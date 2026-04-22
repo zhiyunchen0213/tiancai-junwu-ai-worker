@@ -20,6 +20,13 @@ if [[ -n "${PROVIDER_MODEL:-}" ]]; then
 fi
 unset PROVIDER_KIND PROVIDER_TOKEN PROVIDER_ENDPOINT PROVIDER_MODEL
 
+# MiniMax token is read from worker-local ~/.production.env (not VPS-managed).
+# `source` loads it into shell scope but doesn't export — re-export so
+# `node tts_narration.mjs` (child process) can read process.env.MINIMAX_API_KEY.
+export MINIMAX_API_KEY="${MINIMAX_API_KEY:-}"
+export MINIMAX_API_URL="${MINIMAX_API_URL:-}"
+export MINIMAX_MODEL="${MINIMAX_MODEL:-}"
+
 TASK_ID="$1"
 WORK_DIR="$2"
 
