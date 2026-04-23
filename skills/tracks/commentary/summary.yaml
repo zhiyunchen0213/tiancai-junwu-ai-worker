@@ -1,0 +1,79 @@
+# 解说赛道 (Commentary) — 速查卡
+# 用于 admin.html 赛道规则页面。修改请通过对话，不要手动改这个文件。
+
+id: commentary
+name: 解说赛道 (YouTube Shorts commentary)
+one_liner: 不合成视频，只给剪辑素材 — Gemini 看视频 → Claude 写英文五段解说 → TTS 合成
+audience: US YouTube Shorts 英语观众
+output: 英文解说音频 + 中文对照稿（剪辑师拿去配原视频）
+pipeline: Gemini 分析场景 → Claude 写五段 → Kie TTS (ElevenLabs 通道)
+
+tts:
+  provider: kie（api.kie.ai 异步 job）
+  voice: Brian（Kie 预设名，或填 ElevenLabs voice ID）
+  stability: 0.5
+
+script:
+  provider: kie（claude-sonnet-4-6）
+  style: 美式网感第三人称过去式，单句 10-15 词
+  pacing: 150 wpm 目标（30s→75 词 / 60s→150 词 / 90s→220 词）
+
+five_section_structure:
+  hook: 1 句，15-25 词，引入主角 + 中心钩子，过去式，不用缩写
+  events: 5-10 句，每句 12-20 词，按时间顺序，感官动词（snatched/slammed/froze），短长句交替
+  tease: 1 句，必须以 "I'll show you." 类钩子收尾，暗示类型别剧透
+  cta: 从 5 个模板选 1 个，原文照抄（不改字）
+  reveal: 1 句，15-25 词，情感暗示不直给，不用缩写
+
+cta_templates:
+  - angels_devils（天使 vs 恶魔）
+  - heroes_villains（英雄 vs 恶棍）
+  - would_you_help（你会帮吗）
+  - good_people_check（好人检）
+  - believer_skeptic（信者 vs 怀疑者）
+
+cta_rotation: 用 taskId 作种子随机选
+
+hard_rules:
+  - 纯 JSON 输出，无 markdown 围栏、无前后说明文字
+  - hook/events/tease/cta/reveal 五个主字段必须纯英文（零中文字符）
+  - 中文只能放在 translations 对象里，且不进 TTS
+  - hook 和 reveal 禁止使用缩写（更电影感）；events / tease 允许缩写
+  - CTA text 必须照抄模板原文，只选 template_id
+  - 零广告植入、零 merch 推广
+  - 禁止说教式形容词（amazing / incredible）
+  - 句长必须变化（忌 5 句同长度 12 词）
+  - translations.events 数量必须等于 events 数量
+
+review_workflow:
+  - 输入可含 reviewer_correction 字段：人工审核修正（覆盖 Gemini 场景误读）
+  - 若有 correction，必须作为权威信号修正叙事方向、角色关系、语气
+
+differentiation: |
+  最特殊的赛道 — 唯一不生成 AI 视频、只生成解说音频的赛道。
+  worker 不跑即梦 / Dreamina，只跑 Gemini + Claude + Kie TTS。
+  产物是剪辑素材（.mp3 + .txt + .srt），给剪辑师拿去配原视频。
+  没有 631 打分、没有即梦风格、没有 IP 角色——赛道结构完全不同。
+
+# 第一视角子模式（2026-04-22 新增）
+first_person_submode:
+  one_liner: 角色以第一人称讲述自己的亲历，全破墙直接对观众说话
+  pov_character_id: G1 审核员从 AI 识别的候选列表里选一个
+  voice_mapping: 按主角 gender+age_band 自动推荐，可在音色面板改
+  style_rules:
+    - 混合时态：hook/reveal 强制过去式（禁缩写），events/tease 允许切历史现在时做紧张片段
+    - 全破墙：CTA 部分主角直接对观众说话（`You tell me / You decide`），events/hook/reveal 不破墙
+    - 第一人称代词（`I / me / my`），不自称第三人称
+    - CTA 从 `first_person` 模板组选 1 个，`taskId` 做随机种子
+  tts_voice_selection:
+    recommendation_rule: voice_panel.is_default_for 精确匹配 <gender>:<age_band> 降级同性别任意
+    reviewer_override: G1 可任意替换，或手输 ElevenLabs voice_id
+  single_candidate_behavior: G1 自动跳过选择环节，直接采用唯一候选
+  no_candidate_behavior: task 标 pov_unavailable，审核员一键切回第三人称复用原分析
+  delivery_output:
+    - narration-<protagonist>-pov.mp3
+    - transcript-<protagonist>-pov.txt
+    - subtitles-<protagonist>-pov.srt
+    - script.json
+    - protagonist_card.json
+    - scenes.json

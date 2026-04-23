@@ -2,28 +2,36 @@ id: commentary
 kind: commentary
 name: 解说赛道 (YouTube Shorts style)
 description: Gemini 分析视频 → Claude 写英文网感五段解说 → ElevenLabs TTS，不合成视频，只给剪辑素材
-version: "1.0"
+version: "2.0"
 created_at: "2026-04-15"
+updated_at: "2026-04-22"
 author: tiancai
 
+# 子模式：第三人称旁白 vs 第一视角角色自述
+pov_modes: [third_person, first_person]
+default_pov_mode: third_person
+
+# 第一视角模式下，Phase A 额外跑角色识别
+character_identification:
+  enabled_when_pov_mode: first_person
+  provider: gemini
+  min_candidates: 1
+  max_candidates: 5
+
 # TTS — routed via Kie async job (elevenlabs/text-to-dialogue-v3)
-# See scripts/worker/commentary/tts_narration.mjs
+# 第三人称固定 voice；第一视角用 G1 审核员选的 voice_id
 tts:
-  provider: kie       # 'kie' (默认, 走 api.kie.ai 异步 job); 历史值 'elevenlabs' 已废弃
-  voice_id: "Brian"    # Kie 接受预设名 (Adam/Alice/Brian) 或 ElevenLabs voice ID
+  provider: kie
+  default_voice_id: "Brian"
   stability: 0.5
 
-# Script writer — routed via Kie Anthropic-compatible endpoint by default
-# See scripts/worker/commentary/lib/claude-client.mjs
+# Script writer — 两套 prompt 按 pov_mode 切换
 script:
-  provider: kie       # 'kie' (bearer auth) | 'apimart' (x-api-key) | 'anthropic' (直连)
+  provider: kie
   model: claude-sonnet-4-6
-  style: "美式网感第三人称过去式，单句 10-15 词，参考节奏 150wpm（软提示）"
+  style: "美式网感，150wpm 节奏（软提示）"
   structure: ["hook", "events", "tease", "cta", "reveal"]
-  # CTA 位置固定：tease 之后、reveal 之前
-  cta_rotation: random   # 种子来自 taskId
-
-# Mixing
-mixing:
-  duck_original_db: -18
-  narration_volume_db: 0
+  prompts:
+    third_person: narration_prompt.md
+    first_person: narration_prompt_1p.md
+  cta_rotation: random
