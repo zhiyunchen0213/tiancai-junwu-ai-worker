@@ -8,7 +8,6 @@
 # or a nested object (api/v1/tasks/<id> response shape). Both are handled.
 #
 # Exported vars (only when present & valid):
-#   COMMENTARY_TTS_PROVIDER   (kie | minimax; default kie in downstream)
 #   COMMENTARY_VOICE
 #   COMMENTARY_LANGUAGE_CODE
 #   COMMENTARY_CTA_TEMPLATE_ID
@@ -50,10 +49,6 @@ def emit(key, val):
         return
     print(f"export {key}={shlex.quote(str(val))}")
 
-provider = cp.get("tts_provider")
-if isinstance(provider, str) and provider.strip():
-    emit("COMMENTARY_TTS_PROVIDER", provider.strip().lower())
-
 voice = cp.get("voice")
 if isinstance(voice, str) and voice.strip():
     emit("COMMENTARY_VOICE", voice.strip())
@@ -78,7 +73,7 @@ PY
 
 if [[ -n "$_CP_EXPORTS" ]]; then
   eval "$_CP_EXPORTS"
-  echo "[commentary_params] exported: ${COMMENTARY_TTS_PROVIDER:+provider=$COMMENTARY_TTS_PROVIDER }${COMMENTARY_VOICE:+voice=$COMMENTARY_VOICE }${COMMENTARY_LANGUAGE_CODE:+lang=$COMMENTARY_LANGUAGE_CODE }${COMMENTARY_CTA_TEMPLATE_ID:+cta=$COMMENTARY_CTA_TEMPLATE_ID }${COMMENTARY_STABILITY:+stability=$COMMENTARY_STABILITY}"
+  echo "[commentary_params] exported: ${COMMENTARY_VOICE:+voice=$COMMENTARY_VOICE }${COMMENTARY_LANGUAGE_CODE:+lang=$COMMENTARY_LANGUAGE_CODE }${COMMENTARY_CTA_TEMPLATE_ID:+cta=$COMMENTARY_CTA_TEMPLATE_ID }${COMMENTARY_STABILITY:+stability=$COMMENTARY_STABILITY}"
   if [[ -n "${COMMENTARY_CORRECTION:-}" ]]; then
     echo "[commentary_params] correction provided ($(printf '%s' "$COMMENTARY_CORRECTION" | wc -c | tr -d ' ') chars)"
   fi
