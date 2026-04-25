@@ -8,7 +8,7 @@
     <array>
         <string>/bin/bash</string>
         <string>-c</string>
-        <string>sleep 20 &amp;&amp; cd ~/worker-code &amp;&amp; source ~/.production.env &amp;&amp; export SCRIPTS_DIR=$HOME/worker-code/scripts &amp;&amp; exec bash scripts/worker/material-ingest/main.sh &gt;&gt; ~/production/logs/material-ingest.log 2&gt;&amp;1</string>
+        <string>sleep 20 &amp;&amp; cd ~/worker-code &amp;&amp; set -a &amp;&amp; source ~/.production.env &amp;&amp; set +a &amp;&amp; export SCRIPTS_DIR=$HOME/worker-code/scripts &amp;&amp; exec bash scripts/worker/material-ingest/main.sh &gt;&gt; ~/production/logs/material-ingest.log 2&gt;&amp;1</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
