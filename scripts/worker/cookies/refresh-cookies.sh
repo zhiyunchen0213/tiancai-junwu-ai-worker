@@ -27,11 +27,14 @@ refresh_one() {
 
     printf '# Netscape HTTP Cookie File\n' > "$tmp"
 
+    # --playlist-end 1: 首页只取第一条 entry, 避免 yt-dlp 爬整个 home feed
+    #   (爬全部要 10+ 分钟, cookies 在 cookie jar finalize 时才落盘 → 限量也照样拿到 cookies)
     "$YT_DLP" \
         --cookies-from-browser 'chrome:Profile 1' \
         --cookies "$tmp" \
         --skip-download \
         --simulate \
+        --playlist-end 1 \
         --extractor-args 'youtubetab:skip=authcheck' \
         --no-warnings \
         --quiet \
