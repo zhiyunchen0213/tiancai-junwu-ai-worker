@@ -67,9 +67,23 @@ handle_download() {
 
 handle_analyze() {
   local material_id="$1"
-  local source_url="$2"
-  log "analyze $material_id: $source_url"
-  if analysis=$("${SCRIPT_DIR}/analyze.sh" "$source_url" 2>/tmp/an-err.log); then
+  local raw_path="$2"
+  : "${MATERIAL_LIBRARY_PATH:?MATERIAL_LIBRARY_PATH required for analyze}"
+
+  if [[ -z "$raw_path" || "$raw_path" == "null" ]]; then
+    report_failure "$material_id" "analyze" "raw_path missing in claim response"
+    return
+  fi
+
+  local abs_path="${MATERIAL_LIBRARY_PATH}/${raw_path}"
+  if [[ ! -f "$abs_path" ]]; then
+    report_failure "$material_id" "analyze" "mp4 file not found at $abs_path"
+    return
+  fi
+
+  log "analyze $material_id: $abs_path ($(du -h "$abs_path" | cut -f1))"
+  # analyze.mjs (Node) 直接调 APImart Gemini, 输出 JSON 到 stdout. 替代旧的 analyze.sh.
+  if analysis=$(node "${SCRIPT_DIR}/analyze.mjs" "$abs_path" 2>/tmp/an-err.log); then
     report_success "$material_id" "analyze" "$(jq -n --argjson a "$analysis" '{analysis: $a}')"
   else
     local err
@@ -94,16 +108,17 @@ main_loop() {
     while [[ $i -lt $task_count ]]; do
       local task
       task=$(echo "$task_json" | jq -r ".tasks[$i]")
-      local material_id source_url channel_handle video_id phase
+      local material_id source_url channel_handle video_id phase raw_path
       material_id=$(echo "$task" | jq -r '.material_id')
       source_url=$(echo "$task" | jq -r '.source_url')
       channel_handle=$(echo "$task" | jq -r '.channel_handle // "manual"')
       video_id=$(echo "$task" | jq -r '.video_id // (.source_url | split("/")[-1])')
       phase=$(echo "$task" | jq -r '.phase')
+      raw_path=$(echo "$task" | jq -r '.raw_path // ""')
 
       case "$phase" in
         download) handle_download "$material_id" "$source_url" "$channel_handle" "$video_id" ;;
-        analyze)  handle_analyze "$material_id" "$source_url" ;;
+        analyze)  handle_analyze "$material_id" "$raw_path" ;;
         *)        log "unknown phase: $phase"; report_failure "$material_id" "$phase" "unknown phase" ;;
       esac
       i=$((i+1))
