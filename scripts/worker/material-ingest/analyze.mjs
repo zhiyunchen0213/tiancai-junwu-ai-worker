@@ -167,5 +167,9 @@ try {
   process.exit(9);
 }
 
+// 注入 _model / _prompt_version meta, 让后端 insertAnalysis 记到 DB 不再走 hardcode 兜底
+parsed._model = model;
+parsed._prompt_version = 'v1';
+
 // 输出 JSON 给 main.sh, jq --argjson 接得住
 process.stdout.write(JSON.stringify(parsed));
