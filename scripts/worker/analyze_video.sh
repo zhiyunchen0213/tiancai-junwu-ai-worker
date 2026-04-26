@@ -1,8 +1,11 @@
 #!/bin/bash
 
 # 视频内容分析脚本 - Phase A, Step 3
-# 功能: 使用Kimi CLI进行视频内容分析和元数据提取
-# 依赖: kimi (Kimi CLI), ffprobe
+# 2026-04-26: 从 Kimi CLI 切到 VPS Gemini 3 Flash (apimart). Worker 不再本地调 LLM,
+# 改成 curl POST /api/v1/tasks/:tid/analyze-source-video. source video 早就上传 VPS,
+# 拿回 markdown 写入 kimi_analysis.md (文件名保留, 下游 ai_judgment.sh / worker_main.sh
+# 还在用这个文件名).
+# 依赖: ffprobe, curl, jq
 
 set -euo pipefail
 
@@ -99,59 +102,9 @@ elif [[ -n "$SYNOPSIS_FILE" ]]; then
     echo -e "${YELLOW}⚠ 指定的故事大纲文件不存在: $SYNOPSIS_FILE${NC}"
 fi
 
-read -r -d '' ANALYSIS_PROMPT << EOF || true
-${SYNOPSIS_CONTEXT}请详细分析这个视频内容，并以markdown格式输出以下信息：
-
-## 视频类型和主题
-描述视频的类型、主要主题和核心内容
-
-## 角色列表
-列出视频中的所有角色（如果有），包含：
-- 角色名称
-- 外观描述
-- 角色类型（主角/配角/旁白等）
-
-## 时序故事大纲（极其重要，不可省略！）
-按时间顺序用表格列出完整剧情，必须用这个格式：
-
-| 时间段 | 场景 | 角色 | 内容描述 | 对白/旁白 |
-|--------|------|------|----------|-----------|
-| 0-5s | 教室 | 女主、女反派 | 开场画面... | "台词..." |
-
-要求：
-- 每 5 秒一行，覆盖视频全部时长
-- 场景列要写具体地点（教室、走廊、户外等）
-- 角色列要列出该时段出现的所有角色
-- 对白列记录原声对白（如有）
-- 这是后续改编的核心依据，必须详细准确
-
-## 叙事结构
-分析视频的故事结构：
-- 开场Hook：如何吸引观众注意力
-- 发展：故事如何推进
-- 高潮：最重要的时刻
-- 结尾：如何收场
-
-## 情绪曲线
-描述视频的情感节奏：
-- 开始阶段的情绪
-- 中段情绪变化
-- 结束阶段的情绪
-- 整体情绪趋势
-
-## 爆款元素分析
-分析视频可能成为爆款的要素：
-- 新奇性：是否具有新颖性
-- 情感代入：观众共鸣点
-- 视觉冲击力：画面吸引力
-- 节奏感：内容节奏是否紧凑
-- 转发价值：用户分享的可能性
-
-请确保输出清晰、结构化，便于后续内容策划和制作。
-EOF
-
-# 第3步: 调用Kimi API (带重试)
-echo -e "${YELLOW}[3/4] 调用Kimi进行分析...${NC}"
+# Prompt 已经移到 server 端 (server.js endpoint), worker 只传 synopsis 文本
+# 第3步: 调 VPS Gemini endpoint
+echo -e "${YELLOW}[3/4] 调用 VPS Gemini 进行分析...${NC}"
 
 OUTPUT_FILE="$WORK_DIR/kimi_analysis.md"
 ANALYSIS_LOG="$WORK_DIR/kimi_analysis.log"
@@ -159,35 +112,69 @@ MAX_RETRIES=2
 ATTEMPT=1
 ANALYSIS_SUCCESS=0
 
+# WORK_DIR 形如 .../work_<task_id>, 提取出 task_id 给 endpoint 路径用
+TASK_ID=$(basename "$WORK_DIR" | sed 's/^work_//')
+if [[ -z "$TASK_ID" || "$TASK_ID" == "$WORK_DIR" ]]; then
+    echo -e "${RED}错误: 无法从 WORK_DIR ($WORK_DIR) 解析 task id${NC}"
+    exit 1
+fi
+
+if [[ -z "${REVIEW_SERVER_URL:-}" || -z "${DISPATCHER_TOKEN:-}" ]]; then
+    echo -e "${RED}错误: REVIEW_SERVER_URL / DISPATCHER_TOKEN 未配置 (~/.production.env)${NC}"
+    exit 1
+fi
+
+# 构造 JSON body — synopsis 走 jq 转义 (避免引号 / 多行 / unicode 把 JSON 打坏)
+SYNOPSIS_TEXT=""
+if [[ -n "$SYNOPSIS_FILE" ]] && [[ -f "$SYNOPSIS_FILE" ]]; then
+    SYNOPSIS_TEXT=$(cat "$SYNOPSIS_FILE")
+fi
+PAYLOAD=$(jq -n --arg s "$SYNOPSIS_TEXT" '{synopsis: $s}')
+
 while [[ $ATTEMPT -le $MAX_RETRIES ]]; do
     echo "分析尝试 $ATTEMPT/$MAX_RETRIES..."
 
-    # Kimi CLI v1.26+: --print 启用非交互模式，--quiet = --print --final-message-only
-    if kimi -p "$ANALYSIS_PROMPT
+    # 注: source video 必须早就上传到 VPS (worker_main.sh 在 download_and_extract 后跑 upload).
+    # 端点超时给 5 分钟 (Gemini 视频分析最长见过 90s, 5 分钟兜底安全).
+    HTTP_CODE=$(curl --silent --output "$ANALYSIS_LOG.raw" --write-out '%{http_code}' \
+        --max-time 300 \
+        -X POST \
+        -H "Authorization: Bearer $DISPATCHER_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD" \
+        "$REVIEW_SERVER_URL/api/v1/tasks/$TASK_ID/analyze-source-video" 2>"$ANALYSIS_LOG.curlerr") || HTTP_CODE=000
 
-请分析工作目录中的视频文件 original.mp4，输出结构化分析报告。" \
-        -w "$WORK_DIR" \
-        --quiet \
-        > "$OUTPUT_FILE" 2>"$ANALYSIS_LOG"; then
-        ANALYSIS_SUCCESS=1
-        echo -e "${GREEN}✓ Kimi分析成功${NC}"
-        break
-    else
-        ANALYSIS_ERROR=$(cat "$ANALYSIS_LOG" 2>/dev/null || echo "未知错误")
-        echo -e "${YELLOW}分析尝试失败: $ANALYSIS_ERROR${NC}"
-
-        if [[ $ATTEMPT -lt $MAX_RETRIES ]]; then
-            WAIT=$((5 * ATTEMPT))
-            echo "等待 $WAIT 秒后重试..."
-            sleep $WAIT
+    if [[ "$HTTP_CODE" == "200" ]]; then
+        # 抽 markdown 字段写入 OUTPUT_FILE
+        if jq -er '.markdown' "$ANALYSIS_LOG.raw" > "$OUTPUT_FILE" 2>"$ANALYSIS_LOG"; then
+            ANALYSIS_SUCCESS=1
+            MODEL=$(jq -r '.model // "unknown"' "$ANALYSIS_LOG.raw")
+            TOKENS=$(jq -r '.tokenUsage // 0' "$ANALYSIS_LOG.raw")
+            echo -e "${GREEN}✓ Gemini 分析成功 (model=$MODEL, tokens=$TOKENS)${NC}"
+            rm -f "$ANALYSIS_LOG.raw" "$ANALYSIS_LOG.curlerr"
+            break
+        else
+            echo -e "${YELLOW}分析尝试失败: HTTP 200 但 markdown 字段解析失败${NC}"
+            cat "$ANALYSIS_LOG.raw" | head -200 >> "$ANALYSIS_LOG"
         fi
+    else
+        ERR_MSG=$(jq -r '.error // empty' "$ANALYSIS_LOG.raw" 2>/dev/null || echo "")
+        echo -e "${YELLOW}分析尝试失败: HTTP $HTTP_CODE${ERR_MSG:+ — $ERR_MSG}${NC}"
+        cat "$ANALYSIS_LOG.raw" 2>/dev/null | head -200 >> "$ANALYSIS_LOG"
+        cat "$ANALYSIS_LOG.curlerr" 2>/dev/null >> "$ANALYSIS_LOG"
+    fi
+
+    if [[ $ATTEMPT -lt $MAX_RETRIES ]]; then
+        WAIT=$((5 * ATTEMPT))
+        echo "等待 $WAIT 秒后重试..."
+        sleep $WAIT
     fi
 
     ((ATTEMPT++))
 done
 
 if [[ $ANALYSIS_SUCCESS -eq 0 ]]; then
-    echo -e "${RED}错误: Kimi分析失败 (已尝试 $MAX_RETRIES 次)${NC}"
+    echo -e "${RED}错误: Gemini 分析失败 (已尝试 $MAX_RETRIES 次)${NC}"
     cat "$ANALYSIS_LOG"
     exit 1
 fi
@@ -236,7 +223,7 @@ cat > "$WORK_DIR/analyze_metadata.json" << EOF
   "analysis_timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "video_file": "$VIDEO_FILE",
   "video_duration_seconds": "${VIDEO_DURATION}",
-  "analysis_model": "kimi",
+  "analysis_model": "${MODEL:-gemini-3-flash-preview-nothinking}",
   "analysis_language": "zh",
   "analysis_file": "$OUTPUT_FILE",
   "analysis_size_bytes": $ANALYSIS_SIZE,

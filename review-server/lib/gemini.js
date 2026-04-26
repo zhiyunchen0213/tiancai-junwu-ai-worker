@@ -201,6 +201,44 @@ export async function* analyzeVideoStream({ url, providerName, apiKey, model, fe
   }
 }
 
+/**
+ * 本地视频文件分析 — 用于 Phase A worker 替代 Kimi CLI.
+ *
+ * 与 analyzeVideoStream 区别:
+ * - 输入是 VPS 本地文件路径 (worker 已经上传过 source video), 不再 fetch
+ * - 接收任意自定义 prompt (Kimi 风格 markdown 而不是 gemini.js 的 JSON 风格)
+ * - 阻塞返回完整 markdown 字符串, 不流式 (worker 这个调用点等结果)
+ * - 文件 >20MB 直接 throw (apimart-gemini 当前不支持 File API, 走 inline base64)
+ */
+export async function analyzeLocalVideoMarkdown({ filePath, providerName, apiKey, model, prompt }) {
+  if (!existsSync(filePath)) {
+    throw new Error(`Source video not found: ${filePath}`);
+  }
+  const provider = getProvider(providerName);
+  const buffer = readFileSync(filePath);
+  if (buffer.length > 20 * 1024 * 1024) {
+    throw new Error(`视频 ${(buffer.length / 1048576).toFixed(1)}MB 超过 20MB inline 限制`);
+  }
+  const contents = [{
+    role: 'user',
+    parts: [
+      { inlineData: { mimeType: 'video/mp4', data: buffer.toString('base64') } },
+      { text: prompt },
+    ],
+  }];
+  let markdown = '';
+  let usedModel = model;
+  let tokenUsage = 0;
+  for await (const chunk of provider.generateContentStream({ apiKey, model, contents })) {
+    if (chunk.type === 'text') markdown += chunk.content;
+    if (chunk.type === 'done') {
+      usedModel = chunk.model || usedModel;
+      tokenUsage = chunk.tokenUsage || tokenUsage;
+    }
+  }
+  return { markdown, model: usedModel, tokenUsage, sizeBytes: buffer.length };
+}
+
 /** 图片分析 */
 export async function analyzeImage({ url, providerName, apiKey, model, feedback }) {
   const provider = getProvider(providerName);

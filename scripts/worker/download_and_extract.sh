@@ -185,20 +185,19 @@ fi
 
 # 第2步: 下载视频
 # 下载器链: yt-dlp (通用) → lux (国内平台 fallback, 抖音/B站反爬绕过)
-# 代理策略: 国内平台 (douyin/bilibili) 走直连 (no_proxy=*), 海外平台走系统代理
+# 代理策略: 默认走系统代理 7890 (Clash/Verge 规则模式自己决定每个域名走代理还是直连)
 echo -e "${YELLOW}[2/5] 下载视频...${NC}"
 
 MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
 MACKING_USER="${MACKING_USER:-zjw-mini}"
 
-# 国内平台需要绕过系统代理 (Clash 等)
-# 所有平台都绕系统代理. 2026-04-21 实测: 国内平台本来就需要直连; YouTube 等海外
-# 平台走 Clash 系统代理反而触发 MITM, Python urllib TLS 指纹被 YouTube reject
-# (curl 直连 200 OK 但 yt-dlp SSL EOF 的根因). 东莞直连 YouTube 能通, 先默认直连;
-# 如将来 GFW 变化需要代理, 通过环境变量 DOWNLOAD_USE_PROXY=1 单独开.
-PROXY_ENV='no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
-if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
-    PROXY_ENV=''
+# 2026-04-26: 默认走系统代理 7890. 4-21 那次"东莞直连能通 + Clash MITM 触发 SSL EOF"的
+# 假设今天不再成立 (东莞直连 YouTube TCP timeout, 走代理反而稳). Clash 规则模式自己
+# 路由 douyin/bilibili 直连, youtube/google 走代理. 保留 DOWNLOAD_USE_PROXY=0 作为
+# 强制直连的 escape hatch (测试 / 未来 GFW 政策变化时备用).
+PROXY_ENV='HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
+if [[ "${DOWNLOAD_USE_PROXY:-1}" == "0" ]]; then
+    PROXY_ENV='no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
 fi
 
 # ── 本机下载函数 ──
@@ -243,11 +242,11 @@ try_download_macking() {
     local remote_dir="/tmp/yt-dl-$$-${RANDOM}"
 
     # 在 macking 上执行: cookie 提取 → yt-dlp → lux fallback
-    # 绕过系统代理: macking 上 ClashX Pro 监听 7890 会 MITM 拦截 Python urllib,
-    # yt-dlp 直连能过. DOWNLOAD_USE_PROXY=1 可强制走代理 (GFW 重新严打时).
-    local remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
-    if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
-        remote_proxy_env=''
+    # 2026-04-26: 同步主流程, 默认走 macking 系统代理 7890. 4-21 的 ClashX MITM 问题不再出现,
+    # 实测走代理稳定. Clash 自己按规则路由 (douyin/bilibili 直连, youtube 走代理).
+    local remote_proxy_env='export HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
+    if [[ "${DOWNLOAD_USE_PROXY:-1}" == "0" ]]; then
+        remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
     fi
 
     REMOTE_SCRIPT="
@@ -343,13 +342,15 @@ while [[ $ATTEMPT -le $MAX_ATTEMPTS ]]; do
             break
         fi
     else
-        # 远程 worker: macking 代理优先，本机 fallback
-        if try_download_macking; then
+        # 远程 worker: 2026-04-26 翻转顺序为本机优先, macking 当 fallback.
+        # 原因: (1) 本机更快, 不依赖反向 SSH; (2) macking 一挂全部 worker 瘫.
+        # 现在每个 worker 自带 Clash, 本机能独立下载.
+        if try_download_local; then
             DOWNLOAD_SUCCESS=1
             break
         fi
-        echo "尝试本机 fallback..."
-        if try_download_local; then
+        echo "尝试 macking 代理 fallback..."
+        if try_download_macking; then
             DOWNLOAD_SUCCESS=1
             break
         fi
