@@ -202,6 +202,35 @@ export async function* analyzeVideoStream({ url, providerName, apiKey, model, fe
 }
 
 /**
+ * 远程视频 URL 分析 — Phase A YouTube URL 直传 fast path.
+ *
+ * Gemini 服务端用自己的网络拉 YouTube, 不走 GFW / 不读本地文件 / 不压缩.
+ * 大视频 (>20MB inline cap) 优选这条, 节省 worker 下载等待 + 跳过 ffmpeg 压缩耗时.
+ * Provider 必须支持 fileData URL (apimart-gemini / official-gemini 都支持).
+ */
+export async function analyzeRemoteVideoMarkdown({ fileUri, providerName, apiKey, model, prompt }) {
+  const provider = getProvider(providerName);
+  const contents = [{
+    role: 'user',
+    parts: [
+      { fileData: { fileUri, mimeType: 'video/mp4' } },
+      { text: prompt },
+    ],
+  }];
+  let markdown = '';
+  let usedModel = model;
+  let tokenUsage = 0;
+  for await (const chunk of provider.generateContentStream({ apiKey, model, contents })) {
+    if (chunk.type === 'text') markdown += chunk.content;
+    if (chunk.type === 'done') {
+      usedModel = chunk.model || usedModel;
+      tokenUsage = chunk.tokenUsage || tokenUsage;
+    }
+  }
+  return { markdown, model: usedModel, tokenUsage };
+}
+
+/**
  * 本地视频文件分析 — 用于 Phase A worker 替代 Kimi CLI.
  *
  * 与 analyzeVideoStream 区别:

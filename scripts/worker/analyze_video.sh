@@ -21,14 +21,21 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# 解析参数（支持 --synopsis 可选参数）
+# 解析参数（支持 --synopsis / --video-url 可选参数）
 WORK_DIR=""
 SYNOPSIS_FILE=""
+VIDEO_URL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --synopsis)
             SYNOPSIS_FILE="$2"
+            shift 2
+            ;;
+        --video-url)
+            # YouTube URL 时 server 会走 fileData URL 直传 (跳过本地文件读+ffmpeg压缩),
+            # 非 YouTube 时 server 自动 fallback 到本地 source video.
+            VIDEO_URL="$2"
             shift 2
             ;;
         -*)
@@ -124,12 +131,12 @@ if [[ -z "${REVIEW_SERVER_URL:-}" || -z "${DISPATCHER_TOKEN:-}" ]]; then
     exit 1
 fi
 
-# 构造 JSON body — synopsis 走 jq 转义 (避免引号 / 多行 / unicode 把 JSON 打坏)
+# 构造 JSON body — synopsis / videoUrl 走 jq 转义 (避免引号 / 多行 / unicode 把 JSON 打坏)
 SYNOPSIS_TEXT=""
 if [[ -n "$SYNOPSIS_FILE" ]] && [[ -f "$SYNOPSIS_FILE" ]]; then
     SYNOPSIS_TEXT=$(cat "$SYNOPSIS_FILE")
 fi
-PAYLOAD=$(jq -n --arg s "$SYNOPSIS_TEXT" '{synopsis: $s}')
+PAYLOAD=$(jq -n --arg s "$SYNOPSIS_TEXT" --arg u "$VIDEO_URL" '{synopsis: $s, videoUrl: $u}')
 
 while [[ $ATTEMPT -le $MAX_RETRIES ]]; do
     echo "分析尝试 $ATTEMPT/$MAX_RETRIES..."
@@ -150,7 +157,8 @@ while [[ $ATTEMPT -le $MAX_RETRIES ]]; do
             ANALYSIS_SUCCESS=1
             MODEL=$(jq -r '.model // "unknown"' "$ANALYSIS_LOG.raw")
             TOKENS=$(jq -r '.tokenUsage // 0' "$ANALYSIS_LOG.raw")
-            echo -e "${GREEN}✓ Gemini 分析成功 (model=$MODEL, tokens=$TOKENS)${NC}"
+            ANALYZE_MODE=$(jq -r '.mode // "unknown"' "$ANALYSIS_LOG.raw")
+            echo -e "${GREEN}✓ Gemini 分析成功 (mode=$ANALYZE_MODE, model=$MODEL, tokens=$TOKENS)${NC}"
             rm -f "$ANALYSIS_LOG.raw" "$ANALYSIS_LOG.curlerr"
             break
         else

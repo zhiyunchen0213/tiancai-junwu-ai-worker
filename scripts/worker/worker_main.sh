@@ -638,7 +638,13 @@ run_phase_a() {
         synopsis_args=("--synopsis" "$synopsis_file")
         log_info "Using synopsis (${#synopsis_content} chars)"
     fi
-    if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}"; then
+    # 把原 video_url 透传给 analyze_video.sh, server 端用于 YouTube URL 直传判定.
+    # uploaded:// 协议跳过 (Gemini 拉不到, 走本地文件路径).
+    local video_url_args=()
+    if [[ -n "$video_url" && "$video_url" != uploaded://* ]]; then
+        video_url_args=("--video-url" "$video_url")
+    fi
+    if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}" "${video_url_args[@]+"${video_url_args[@]}"}"; then
         log_warn "Kimi analysis failed, falling back to Whisper transcription + text analysis"
         report_progress "$task_id" "Phase A: 分析降级" "Kimi 失败，等待 Whisper 降级重试"
         # 降级方案: 等后台 Whisper 完成，然后用转写文本重试分析
@@ -648,7 +654,13 @@ run_phase_a() {
             whisper_pid=""
         fi
         # 重试分析（这次 analyze_video.sh 会检测到 transcript.txt 存在并使用它）
-        if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}"; then
+        # 把原 video_url 透传给 analyze_video.sh, server 端用于 YouTube URL 直传判定.
+    # uploaded:// 协议跳过 (Gemini 拉不到, 走本地文件路径).
+    local video_url_args=()
+    if [[ -n "$video_url" && "$video_url" != uploaded://* ]]; then
+        video_url_args=("--video-url" "$video_url")
+    fi
+    if ! bash "$scripts_dir/analyze_video.sh" "$work_dir" "${synopsis_args[@]+"${synopsis_args[@]}"}" "${video_url_args[@]+"${video_url_args[@]}"}"; then
             log_error "Analysis failed even with fallback"
             PHASE_A_FAIL_DETAIL="视频分析失败(Kimi+Whisper均失败)"
             return 1
