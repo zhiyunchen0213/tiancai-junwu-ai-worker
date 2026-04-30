@@ -15,6 +15,12 @@ fi
 
 unset PROVIDER_KIND PROVIDER_TOKEN PROVIDER_ENDPOINT PROVIDER_MODEL
 
+if [[ -z "${REVIEW_SERVER_URL:-}" || -z "${DISPATCHER_TOKEN:-}" ]]; then
+  echo "[fetch_provider] $__fp_capability: REVIEW_SERVER_URL or DISPATCHER_TOKEN missing, will use env fallback"
+  unset __fp_capability
+  return 0 2>/dev/null || exit 0
+fi
+
 __fp_resp=$(curl -fsS --max-time 5 \
   "${REVIEW_SERVER_URL}/api/v1/providers/active?capability=${__fp_capability}" \
   -H "Authorization: Bearer ${DISPATCHER_TOKEN}" 2>/dev/null || true)

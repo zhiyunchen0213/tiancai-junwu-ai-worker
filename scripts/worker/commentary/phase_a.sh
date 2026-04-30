@@ -11,36 +11,8 @@ WORKER_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 [[ -f ~/.production.env ]] && source ~/.production.env
 [[ -f ~/.dev-worker.env ]] && source ~/.dev-worker.env
 
-# ── Provider token: DB (VPS) → env fallback ───────────────────────────────
-source "$SCRIPT_DIR/fetch_provider.sh" analysis_chat
-
-# Gemini uses this token for video analysis
-export GEMINI_PROVIDER="${PROVIDER_KIND:-${GEMINI_PROVIDER:-apimart}}"
-export GEMINI_API_KEY="${PROVIDER_TOKEN:-${GEMINI_API_KEY:-}}"
-
-# Claude uses the same token for script writing
-if [[ "$GEMINI_PROVIDER" == "kie" ]]; then
-  export CLAUDE_AUTH_MODE="${CLAUDE_AUTH_MODE:-bearer}"
-  export CLAUDE_ENDPOINT="${CLAUDE_ENDPOINT:-https://api.kie.ai/claude/v1/messages}"
-else
-  export CLAUDE_AUTH_MODE="${CLAUDE_AUTH_MODE:-anthropic}"
-  export CLAUDE_ENDPOINT="${CLAUDE_ENDPOINT:-https://api.apimart.ai/v1/messages}"
-  export ANTHROPIC_VERSION="${ANTHROPIC_VERSION:-2023-06-01}"
-fi
-export ANTHROPIC_API_KEY="${PROVIDER_TOKEN:-${ANTHROPIC_API_KEY:-}}"
-# Admin-configurable model override (2026-04-16): a single `model` field on the
-# api_providers row covers both Gemini (video analysis) and Claude (script
-# writing) for analysis_chat capability. We map it to CLAUDE_SCRIPT_MODEL only,
-# since users most often want to bump Claude versions (e.g. sonnet → opus);
-# Gemini model is still controlled by the GEMINI_VIDEO_MODEL env var on worker.
-if [[ -n "${PROVIDER_MODEL:-}" ]]; then
-  export CLAUDE_SCRIPT_MODEL="$PROVIDER_MODEL"
-else
-  export CLAUDE_SCRIPT_MODEL="${CLAUDE_SCRIPT_MODEL:-claude-sonnet-4-6}"
-fi
-
-# Clear temp vars so subsequent code sees clean env
-unset PROVIDER_KIND PROVIDER_TOKEN PROVIDER_ENDPOINT PROVIDER_MODEL
+# ── Provider token/model: DB (VPS) → env fallback ─────────────────────────
+source "$SCRIPT_DIR/configure_phase_a_providers.sh"
 
 TASK_FILE="$1"
 WORK_DIR="$2"
@@ -70,7 +42,7 @@ else
   "$WORKER_ROOT/download_and_extract.sh" "$VIDEO_URL" "$WORK_DIR"
 fi
 
-# 当前 analysis_chat provider (apimart Gemini) 走 inline 上传，硬上限 20MB。
+# 当前 video_analysis provider (apimart Gemini) 走 inline 上传，硬上限 20MB。
 # 超限就在 worker 端用 Mac 硬件 H.264 编码器降到 ~15MB。video_gen 走 Kimi 没这个限制。
 ORIGINAL_BYTES=$(wc -c < "$WORK_DIR/original.mp4" | tr -d ' ')
 ORIGINAL_MB=$(( ORIGINAL_BYTES / 1024 / 1024 ))
