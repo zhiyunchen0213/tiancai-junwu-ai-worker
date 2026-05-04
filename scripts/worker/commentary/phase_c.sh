@@ -70,7 +70,7 @@ bash "$SCRIPT_DIR/package_delivery.sh" "$TASK_ID" "$WORK_DIR"
 
 NARRATION_SEC=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "$WORK_DIR/narration.mp3" 2>/dev/null || echo "0")
 
-DELIVERY_PATH="${MACKING_USER:-zjw-mini}@${MACKING_HOST:-localhost}:~/production/deliveries/${TASK_ID}/commentary/"
+DELIVERY_PATH="${MACKING_USER:-zjw-mini}@${MACKING_HOST:-localhost}:~/production/deliveries/commentary/${TASK_ID}/"
 PAYLOAD=$(python3 -c "
 import json
 print(json.dumps({

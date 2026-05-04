@@ -45,7 +45,7 @@ main_loop() {
     local plan_json="/tmp/rough-cut-plan-${task_id}.json"
     echo "$resp" | jq '.plan' > "$plan_json"
 
-    local delivery_dir="${DELIVERY_BASE_DIR}/${task_external_id}"
+    local delivery_dir="${DELIVERY_BASE_DIR}/commentary/${task_external_id}"
     local mp3_url
     mp3_url=$(echo "$resp" | jq -r '.narration_mp3_url // empty')
     if [ -n "$mp3_url" ]; then

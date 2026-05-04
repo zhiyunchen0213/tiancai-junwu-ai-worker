@@ -75,13 +75,14 @@ open('$DELIVERY_DIR/protagonist_card.json','w').write(json.dumps(card, ensure_as
 "
 fi
 
-# rsync to macking
+# sync to macking — 产物只留 macking, VPS 不再保存副本.
+# VPS packaging-runner 在 K5 通过后通过 cloudflared HTTPS 回源拉文件.
 MACKING_HOST="${MACKING_HOST:-localhost}"
 MACKING_USER="${MACKING_USER:-$USER}"
-REMOTE_DIR="~/production/deliveries/$TASK_ID/commentary/"
+REMOTE_DIR="~/production/deliveries/commentary/$TASK_ID/"
 
 if [[ "$MACKING_HOST" == "localhost" ]]; then
-  LOCAL_DEST="$HOME/production/deliveries/$TASK_ID/commentary/"
+  LOCAL_DEST="$HOME/production/deliveries/commentary/$TASK_ID/"
   mkdir -p "$LOCAL_DEST"
   cp -r "$DELIVERY_DIR/." "$LOCAL_DEST/"
 else
@@ -93,15 +94,4 @@ else
   done
 fi
 
-# HTTP upload to VPS
-echo "[package] uploading to VPS via HTTP..."
-for f in "$DELIVERY_DIR"/*; do
-  fname=$(basename "$f")
-  curl -sf -X POST "${REVIEW_SERVER_URL}/api/commentary/deliveries/${TASK_ID}/upload" \
-      -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
-      -F "name=${fname}" -F "file=@${f}" --max-time 120 > /dev/null \
-    && echo "[package]   ✓ $fname" \
-    || echo "[package]   ✗ $fname failed" >&2
-done
-
-echo "[package] delivered (pov_mode=${POV_MODE})"
+echo "[package] delivered (pov_mode=${POV_MODE}) — artifacts on macking only, VPS will fetch via HTTPS during packaging"

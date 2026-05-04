@@ -16,7 +16,7 @@ PLAN_JSON="$2"
 : "${DELIVERY_BASE_DIR:?DELIVERY_BASE_DIR required}"
 : "${MATERIAL_LIBRARY_PATH:?MATERIAL_LIBRARY_PATH required}"
 
-DELIVERY_DIR="${DELIVERY_BASE_DIR}/${TASK_ID}"
+DELIVERY_DIR="${DELIVERY_BASE_DIR}/commentary/${TASK_ID}"
 mkdir -p "${DELIVERY_DIR}/clips" "${DELIVERY_DIR}/source_materials"
 
 # 1. 写 concat.txt
