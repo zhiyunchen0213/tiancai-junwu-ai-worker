@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tiancai.cookie-refresh-chrome</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>HOME_PLACEHOLDER/worker-code/scripts/worker/cookies/start-cookie-refresh-chrome.sh</string>
+        <string>--wait</string>
+    </array>
+    <!-- 拉起后保活, 30s 内挂掉自动重启 -->
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <!-- 必须 Aqua session: 抖音检测 headless, 我们用真 GUI Chrome 避坑 -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>StandardOutPath</key>
+    <string>HOME_PLACEHOLDER/production/logs/cookie-refresh-chrome.log</string>
+    <key>StandardErrorPath</key>
+    <string>HOME_PLACEHOLDER/production/logs/cookie-refresh-chrome.log</string>
+</dict>
+</plist>
