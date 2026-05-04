@@ -128,4 +128,30 @@ else
   download_remote
 fi
 
+# 下载完顺便跑 ffprobe 实测 duration, 写到 .duration sidecar 文件 + stderr 显示一行.
+# main.sh 读 sidecar 文件拿 duration. 必须在 macking 端跑 (mp4 在 macking 本地).
+# ffprobe 不在 PATH 时 fallback 到 /opt/homebrew/bin (brew 安装路径).
+FFPROBE=""
+if command -v ffprobe >/dev/null 2>&1; then
+  FFPROBE="ffprobe"
+elif [[ -x /opt/homebrew/bin/ffprobe ]]; then
+  FFPROBE="/opt/homebrew/bin/ffprobe"
+elif [[ -x /usr/local/bin/ffprobe ]]; then
+  FFPROBE="/usr/local/bin/ffprobe"
+fi
+if [[ -n "$FFPROBE" ]] && [[ -f "$TARGET_ABS" ]]; then
+  if [[ "$MACKING_HOST" == "localhost" ]] || [[ "$MACKING_HOST" == "127.0.0.1" ]]; then
+    # macking 本地: 直接跑 ffprobe
+    DUR_VAL=$("$FFPROBE" -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 "$TARGET_ABS" 2>/dev/null || true)
+  else
+    # 远程: 走 SSH 让 macking 上的 ffprobe 跑 (这条路实际不会触发, 因为 download_remote
+    # 已经 ssh 到 macking 调 macking 自己的 download.sh, 那次会走 localhost 分支)
+    DUR_VAL=""
+  fi
+  if [[ -n "$DUR_VAL" ]] && [[ "$DUR_VAL" != "N/A" ]]; then
+    echo "$DUR_VAL" > "${TARGET_ABS}.duration"
+    echo "[download.sh] ffprobe duration: ${DUR_VAL}s" >&2
+  fi
+fi
+
 echo "$REL_PATH"
