@@ -57,7 +57,19 @@ handle_download() {
 
   log "download $material_id: $source_url"
   if raw_path=$("${SCRIPT_DIR}/download.sh" "$source_url" "$channel_handle" "$video_id" 2>/tmp/dl-err.log); then
-    report_success "$material_id" "download" "$(jq -n --arg p "$raw_path" '{raw_path: $p}')"
+    # ffprobe 实测真实 duration (覆盖 capture 时浏览器 DOM 报的虚高值).
+    # 抖音播放器经常 report 循环 duration (真 7s 报 16s), ffprobe 是文件 ground truth.
+    # 失败不致命: dur="" 让 review-server 跳过 UPDATE.
+    local abs_path="${MATERIAL_LIBRARY_PATH}/${raw_path}"
+    local dur=""
+    if [[ -f "$abs_path" ]] && command -v ffprobe >/dev/null 2>&1; then
+      dur=$(ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 "$abs_path" 2>/dev/null || echo "")
+    fi
+    if [[ -n "$dur" ]]; then
+      report_success "$material_id" "download" "$(jq -n --arg p "$raw_path" --argjson d "$dur" '{raw_path: $p, duration_seconds: $d}')"
+    else
+      report_success "$material_id" "download" "$(jq -n --arg p "$raw_path" '{raw_path: $p}')"
+    fi
   else
     local err
     err=$(cat /tmp/dl-err.log | tail -c 500)
