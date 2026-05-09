@@ -3,6 +3,11 @@
 
 const BASE_URL = 'https://api.apimart.ai/v1beta';
 const DEFAULT_MODEL = 'gemini-3-flash-preview-nothinking';
+// 防截断: 长视频 (3min+) 的 shots 数组中文 JSON 输出会到 10k+ tokens.
+// 不传 generationConfig 时 Apimart/中转 provider 默认 cap (常见 8192 / 4096)
+// 会让模型在 ~45s 处自我收尾输出残缺但语法合法的 JSON, 前端无法察觉.
+// 64000 是 gemini-3-flash 系列输出上限, 超过 provider 自动 clamp.
+const MAX_OUTPUT_TOKENS = 64000;
 
 export async function* generateContentStream({ apiKey, model, contents }) {
   const url = `${BASE_URL}/models/${model || DEFAULT_MODEL}:streamGenerateContent?alt=sse`;
@@ -12,7 +17,7 @@ export async function* generateContentStream({ apiKey, model, contents }) {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ contents }),
+    body: JSON.stringify({ contents, generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS } }),
   });
 
   if (!resp.ok) {
@@ -60,7 +65,7 @@ export async function generateContent({ apiKey, model, contents }) {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({ contents }),
+    body: JSON.stringify({ contents, generationConfig: { maxOutputTokens: MAX_OUTPUT_TOKENS } }),
   });
 
   if (!resp.ok) {

@@ -185,19 +185,19 @@ fi
 
 # 第2步: 下载视频
 # 下载器链: yt-dlp (通用) → lux (国内平台 fallback, 抖音/B站反爬绕过)
-# 代理策略: 默认走系统代理 7890 (Clash/Verge 规则模式自己决定每个域名走代理还是直连)
+# 代理策略: 默认直连 (东莞 worker 已切到可直连海外的 WiFi)
 echo -e "${YELLOW}[2/5] 下载视频...${NC}"
 
 MACKING_HOST="${MACKING_HOST:?MACKING_HOST not set}"
 MACKING_USER="${MACKING_USER:-zjw-mini}"
 
-# 2026-04-26: 默认走系统代理 7890. 4-21 那次"东莞直连能通 + Clash MITM 触发 SSL EOF"的
-# 假设今天不再成立 (东莞直连 YouTube TCP timeout, 走代理反而稳). Clash 规则模式自己
-# 路由 douyin/bilibili 直连, youtube/google 走代理. 保留 DOWNLOAD_USE_PROXY=0 作为
-# 强制直连的 escape hatch (测试 / 未来 GFW 政策变化时备用).
-PROXY_ENV='HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
-if [[ "${DOWNLOAD_USE_PROXY:-1}" == "0" ]]; then
-    PROXY_ENV='no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+# 2026-05-09: 默认翻转为直连. 东莞统一切到可直连海外的新 WiFi 后, 5/9 全 worker
+# Clash 上游全死引发 phase_a_download_failed, 但同机直连 youtube/google 全 200.
+# Clash 反而成了不必要的中间环节 (上游故障 + MITM SSL EOF 风险).
+# 保留 DOWNLOAD_USE_PROXY=1 作为 escape hatch (GFW 政策反复 / 新机器没切 WiFi 时备用).
+PROXY_ENV='no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
+    PROXY_ENV='HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
 fi
 
 # ── 本机下载函数 ──
@@ -242,11 +242,10 @@ try_download_macking() {
     local remote_dir="/tmp/yt-dl-$$-${RANDOM}"
 
     # 在 macking 上执行: cookie 提取 → yt-dlp → lux fallback
-    # 2026-04-26: 同步主流程, 默认走 macking 系统代理 7890. 4-21 的 ClashX MITM 问题不再出现,
-    # 实测走代理稳定. Clash 自己按规则路由 (douyin/bilibili 直连, youtube 走代理).
-    local remote_proxy_env='export HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
-    if [[ "${DOWNLOAD_USE_PROXY:-1}" == "0" ]]; then
-        remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+    # 2026-05-09: 同步主流程翻转为直连默认. macking 也切到了可直连海外的新 WiFi.
+    local remote_proxy_env='export no_proxy="*" http_proxy="" https_proxy="" HTTPS_PROXY="" HTTP_PROXY=""'
+    if [[ "${DOWNLOAD_USE_PROXY:-0}" == "1" ]]; then
+        remote_proxy_env='export HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890'
     fi
 
     REMOTE_SCRIPT="
