@@ -607,7 +607,18 @@ run_phase_a() {
         report_progress "$task_id" "Phase A: 下载视频" "正在从 ${video_url%%\?*} 下载"
         if ! bash "$scripts_dir/download_and_extract.sh" "$video_url" "$work_dir"; then
             log_error "download_and_extract.sh failed"
-            PHASE_A_FAIL_DETAIL="视频下载失败"
+            # 抽 download.log 末尾的关键报错带回 VPS, 让看板能看到 yt-dlp 真实错误
+            # (SSL EOF / geo restricted / private / cookie 失效) 而不是空壳"视频下载失败"
+            local _dl_tail=""
+            if [[ -s "$work_dir/download.log" ]]; then
+                _dl_tail=$(tail -c 4000 "$work_dir/download.log" 2>/dev/null \
+                    | grep -iE "ERROR|error:|失败|不可用|cookie|geo|removed|private|SSL|EOF|timeout|HTTP Error|403|404|429" \
+                    | tail -3 \
+                    | tr '\n\r\t\v\f' '    ' \
+                    | tr -d '"\\' \
+                    | head -c 300)
+            fi
+            PHASE_A_FAIL_DETAIL="视频下载失败${_dl_tail:+ — ${_dl_tail}}"
             return 1
         fi
         # 上传原视频到 VPS（下游 ZIP 下载 / macking 剪辑包的唯一真相源）
