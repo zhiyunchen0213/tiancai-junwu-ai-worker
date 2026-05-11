@@ -32,39 +32,58 @@ mkdir -p "$HOME/bin"
 cat > "$UPDATE_SCRIPT" << 'SCRIPT'
 #!/bin/bash
 # worker-auto-update.sh — 自动拉取最新 worker 代码
+#
+# 故障排查要点 (2026-05-11 加固):
+# - git fetch 失败必打 log + exit 1, 不再 silent (之前 stderr 进 /dev/null 静默 1 周没人发现)
+# - 不写死 HTTPS_PROXY (5-09 切直连海外 WiFi 后 Clash 关闭, 写死代理会 fetch 失败)
+# - 每次成功跑都打心跳行 (Up-to-date 或 Updated to), 便于人眼看 worker 活力
 LOG="$HOME/production/logs/auto-update.log"
 REPO="$HOME/worker-code"
+TS() { date '+%Y-%m-%d %H:%M:%S'; }
 
 exec >> "$LOG" 2>&1
 
-# 保持日志不超过 1000 行
+# 保持日志不超过 1000 行 (10 min/次 + 每次 1-3 行 ≈ 1 周容量)
 if [[ -f "$LOG" ]] && [[ $(wc -l < "$LOG") -gt 1000 ]]; then
     tail -500 "$LOG" > "${LOG}.tmp" && mv "${LOG}.tmp" "$LOG"
 fi
 
-cd "$REPO" || exit 1
+cd "$REPO" || { echo "[$(TS)] ERROR: cd $REPO failed"; exit 1; }
 
 # 确保 git 用 HTTP/1.1（GFW 兼容）
 git config http.version HTTP/1.1
 
-# 丢弃本地修改，强制同步远程
 BEFORE=$(git rev-parse HEAD 2>/dev/null)
-git fetch origin main --quiet 2>/dev/null
+
+# git fetch — 不吞 stderr, 失败必打 log
+if ! FETCH_OUT=$(git fetch origin main 2>&1); then
+    echo "[$(TS)] ERROR: git fetch failed — $(echo "$FETCH_OUT" | tr '\n' ' ' | cut -c1-300)"
+    exit 1
+fi
+
 AFTER=$(git rev-parse origin/main 2>/dev/null)
 
 if [[ "$BEFORE" != "$AFTER" ]]; then
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Updating: $(git log --oneline $BEFORE..$AFTER | wc -l | tr -d ' ') new commits"
-    git reset --hard origin/main --quiet 2>/dev/null
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Updated to: $(git log --oneline -1)"
+    NCOMMITS=$(git log --oneline "$BEFORE".."$AFTER" 2>/dev/null | wc -l | tr -d ' ')
+    echo "[$(TS)] Updating: $NCOMMITS new commits"
+
+    if ! RESET_OUT=$(git reset --hard origin/main 2>&1); then
+        echo "[$(TS)] ERROR: git reset failed — $(echo "$RESET_OUT" | tr '\n' ' ' | cut -c1-300)"
+        exit 1
+    fi
+    echo "[$(TS)] Updated to: $(git log --oneline -1)"
 
     # 检查 worker 脚本是否有变更 — 如果有，自动重启 worker 进程
     # LaunchAgent KeepAlive 会自动用新代码拉起新进程
     # 断点续跑由 startup recovery 保障（Phase A 重跑，Phase C/Harvest 释放给 VPS）
     CHANGED=$(git diff --name-only "$BEFORE" "$AFTER" -- scripts/worker/ 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$CHANGED" -gt 0 ]]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Worker scripts changed ($CHANGED files) — restarting worker"
+        echo "[$(TS)] Worker scripts changed ($CHANGED files) — restarting worker"
         pkill -f worker_main.sh 2>/dev/null || true
     fi
+else
+    # 心跳: 没更新也打一行 Up-to-date, 便于人眼看活力
+    echo "[$(TS)] Up-to-date HEAD=$(git rev-parse --short HEAD)"
 fi
 SCRIPT
 chmod +x "$UPDATE_SCRIPT"
