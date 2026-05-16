@@ -63,19 +63,21 @@ fi
 mkdir -p "$USER_DATA_DIR"
 
 # 3. 启 Chrome, GUI 模式 (Aqua session 必需). 不 headless 是因为抖音 anti-bot 检测 webdriver.
-#    nohup + < /dev/null + disown 三连让 Chrome 脱离脚本进程组, 否则脚本 exit
-#    时 launchd 把整个 process group SIGTERM, 把 Chrome 也带走 — 实测这是
-#    "Chrome 每 30s 反复重启" 的真正根因 (5/17 修复). pgrep 看进程消失 = 验证.
+#    用 `open -na` 走 macOS LaunchServices 启动 — Chrome 作为独立 GUI App
+#    跟脚本 / launchd 进程组完全脱钩.
+#    nohup+disown 实测不够 (5/17 验证): launchd 用 process group 管 job, bash
+#    exit 时整个 PG 都 SIGTERM, Chrome 子进程报 "parent died, terminating process".
+#    open -na 是 macOS 启 GUI App 的标准做法, Chrome stderr 全部干净.
+#    -n = 强制新实例 (避免复用 dock 上别的 Chrome 主进程 + 污染 jimeng 9222 登录态).
 log "Starting Chrome with CDP on port $CDP_PORT..."
-nohup "$CHROME" \
+open -na "Google Chrome" \
+    --args \
     --remote-debugging-port="$CDP_PORT" \
     --user-data-dir="$USER_DATA_DIR" \
     --no-first-run \
     --no-default-browser-check \
     --disable-features=ChromeWhatsNewUI \
-    --window-size=1280,800 \
-    < /dev/null > /tmp/cookie-refresh-chrome.log 2>&1 &
-disown
+    --window-size=1280,800
 
 # 4. 等 CDP 起来
 if cdp_healthy 10; then
