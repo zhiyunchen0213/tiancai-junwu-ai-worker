@@ -63,15 +63,19 @@ fi
 mkdir -p "$USER_DATA_DIR"
 
 # 3. 启 Chrome, GUI 模式 (Aqua session 必需). 不 headless 是因为抖音 anti-bot 检测 webdriver.
+#    nohup + < /dev/null + disown 三连让 Chrome 脱离脚本进程组, 否则脚本 exit
+#    时 launchd 把整个 process group SIGTERM, 把 Chrome 也带走 — 实测这是
+#    "Chrome 每 30s 反复重启" 的真正根因 (5/17 修复). pgrep 看进程消失 = 验证.
 log "Starting Chrome with CDP on port $CDP_PORT..."
-"$CHROME" \
+nohup "$CHROME" \
     --remote-debugging-port="$CDP_PORT" \
     --user-data-dir="$USER_DATA_DIR" \
     --no-first-run \
     --no-default-browser-check \
     --disable-features=ChromeWhatsNewUI \
     --window-size=1280,800 \
-    > /tmp/cookie-refresh-chrome.log 2>&1 &
+    < /dev/null > /tmp/cookie-refresh-chrome.log 2>&1 &
+disown
 
 # 4. 等 CDP 起来
 if cdp_healthy 10; then
