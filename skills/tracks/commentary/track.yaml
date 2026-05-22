@@ -6,6 +6,7 @@ version: "2.0"
 created_at: "2026-04-15"
 updated_at: "2026-04-22"
 author: tiancai
+deprecated: true
 
 # 子模式：第三人称旁白 vs 第一视角角色自述
 pov_modes: [third_person, first_person]

@@ -15,24 +15,23 @@ tts:
 
 script:
   provider: kie（claude-sonnet-4-6）
-  style: 美式网感第三人称过去式，单句 10-15 词
+  style: 朋友聊天式第三人称过去式 (voice-style-guide.md)，单句 12-20 词，8 年级词汇
   pacing: 150 wpm 目标（30s→75 词 / 60s→150 词 / 90s→220 词）
 
-five_section_structure:
-  hook: 1 句，15-25 词，引入主角 + 中心钩子，过去式，不用缩写
-  events: 5-10 句，每句 12-20 词，按时间顺序，感官动词（snatched/slammed/froze），短长句交替
-  tease: 1 句，必须以 "I'll show you." 类钩子收尾，暗示类型别剧透
-  cta: 从 5 个模板选 1 个，原文照抄（不改字）
-  reveal: 1 句，15-25 词，情感暗示不直给，不用缩写
+section_structure:
+  hook: 1 句，15-25 词，引入主角 + 在干什么，过去式，不用缩写
+  events: 5-10 句，每句 12-20 词，按时间顺序，简单动词（shook/grabbed/ran），短长句交替
+  tease: (可选) 1 句，暗示后续发展。无悬念时留空
+  cta: (可选) taskId 种子轮转短 CTA（含 none，~25% 无 CTA）
+  reveal: 1 句，15-25 词，收束故事 — 一个事实/反应/"就这样结束了"的观察，不只是最后一个动作
 
 cta_templates:
-  - angels_devils（天使 vs 恶魔）
-  - heroes_villains（英雄 vs 恶棍）
-  - would_you_help（你会帮吗）
-  - good_people_check（好人检）
-  - believer_skeptic（信者 vs 怀疑者）
+  - none（~25% 概率 — 无 CTA）
+  - question_hook（评论引导）
+  - curiosity_follow（关注引导）
+  - share_prompt（分享引导）
 
-cta_rotation: 用 taskId 作种子随机选
+cta_rotation: taskId 种子在全部模板（含 none）中轮转，所有方向均参与
 
 hard_rules:
   - 纯 JSON 输出，无 markdown 围栏、无前后说明文字
@@ -65,6 +64,7 @@ first_person_submode:
     - 全破墙：CTA 部分主角直接对观众说话（`You tell me / You decide`），events/hook/reveal 不破墙
     - 第一人称代词（`I / me / my`），不自称第三人称
     - CTA 从 `first_person` 模板组选 1 个，`taskId` 做随机种子
+    - title_card (可选): "POV: You are X" 定场白是屏幕叠字，不进 TTS；hook 从口播第一句开始
   tts_voice_selection:
     recommendation_rule: voice_panel.is_default_for 精确匹配 <gender>:<age_band> 降级同性别任意
     reviewer_override: G1 可任意替换，或手输 ElevenLabs voice_id

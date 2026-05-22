@@ -19,7 +19,7 @@ echo "2. 旧任务已清理"
 if [ ! -f ~/.production.env ]; then
   echo "WORKER_ID=$WORKER_ID" > ~/.production.env
   echo "SHARED_DIR=$HOME/production" >> ~/.production.env
-  echo "REVIEW_SERVER_URL=http://107.175.215.216" >> ~/.production.env
+  echo "REVIEW_SERVER_URL=http://127.0.0.1:13000" >> ~/.production.env  # autossh -L tunnel
   echo "DISPATCHER_TOKEN=${DISPATCHER_TOKEN:?Set DISPATCHER_TOKEN}" >> ~/.production.env
   echo "AI_AGENT=claude" >> ~/.production.env
   echo "POLL_INTERVAL=30" >> ~/.production.env

@@ -38,7 +38,7 @@ const height = isPortrait ? 1920 : 1080;
 let currentFrame = 0;
 const timedSegments = segments.map((seg, i) => {
   const audio = audioManifest.find(a => a.index === i);
-  const actualDuration = audio?.duration_estimate || seg.duration_hint || 15;
+  const actualDuration = audio?.duration_s || audio?.duration_estimate || seg.duration_hint || 15;
   const durationFrames = Math.round(actualDuration * FPS);
   const startFrame = currentFrame;
   currentFrame += durationFrames;
@@ -60,7 +60,7 @@ const totalFrames = currentFrame;
 // Build audio files list (absolute paths for Remotion)
 const audioFiles = audioManifest
   .filter(a => a.path)
-  .map(a => ({ index: a.index, path: a.path, duration: a.duration_estimate || 15 }));
+  .map(a => ({ index: a.index, path: a.path, duration: a.duration_s || a.duration_estimate || 15 }));
 
 // Build image files list
 const imageFiles = imageManifest

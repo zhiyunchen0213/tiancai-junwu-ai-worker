@@ -7,10 +7,13 @@ export { pickCtaTemplate } from './cta-rotator.mjs';
 function countWords(s) { return (String(s).trim().match(/\S+/g) || []).length; }
 
 export function computeCtaPositionRatio(script) {
+  if (script.cta?.template_id === 'none' || script.cta?.template_id === 'fp_none') {
+    return null;
+  }
   const before = countWords(script.hook)
-    + script.events.reduce((n, e) => n + countWords(e), 0)
-    + countWords(script.tease);
-  const total = before + countWords(script.cta?.text || '') + countWords(script.reveal);
+    + (script.events || []).reduce((n, e) => n + countWords(e), 0)
+    + countWords(script.tease || '');
+  const total = before + countWords(script.cta?.text || '') + countWords(script.reveal || script.close || '');
   return total === 0 ? 0 : before / total;
 }
 
@@ -46,16 +49,19 @@ function validateShape(script, templates, povMode = 'third_person') {
   const errors = [];
   if (!script.hook || typeof script.hook !== 'string') errors.push('hook missing');
   if (!Array.isArray(script.events) || script.events.length < 3) errors.push('events must be >=3 strings');
-  if (!script.tease) errors.push('tease missing');
-  if (!script.cta || !script.cta.template_id || !script.cta.text) errors.push('cta missing');
-  else {
+  if (!script.tease && !script.close) errors.push('tease or close missing');
+  if (!script.cta || !script.cta.template_id) {
+    errors.push('cta missing');
+  } else if (script.cta.template_id !== 'none' && script.cta.template_id !== 'fp_none') {
+    // Non-none CTA must have text and match a known template
+    if (!script.cta.text) errors.push('cta.text missing for non-none template');
     const group = resolveTemplateGroup(templates, povMode);
     const templateIds = new Set(group.map(t => t.template_id || t.id));
     if (!templateIds.has(script.cta.template_id)) {
       errors.push(`cta.template_id "${script.cta.template_id}" not in templates`);
     }
   }
-  if (!script.reveal) errors.push('reveal missing');
+  if (!script.reveal && !script.close) errors.push('reveal or close missing');
   if (errors.length) throw new Error('script-builder shape error: ' + errors.join('; '));
 }
 

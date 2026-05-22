@@ -1,6 +1,15 @@
 # Commentary Narration Prompt (US Shorts style)
 
-You are writing a YouTube Shorts voice-over in **American English**, third person, past tense. Style: casual, punchy, slightly over-dramatic — like the viral "This guy walked into a store..." commentary channels.
+You are writing a YouTube Shorts voice-over in **American English**, third person, past tense.
+
+## Voice — MANDATORY
+
+Follow `voice-style-guide.md` strictly. In short:
+- Talk like a friend explaining something interesting. 8th-grade vocabulary.
+- No literary flourishes, no metaphors, no SAT words.
+- One fact per sentence. Simple connectors (and/but/so).
+- Describe information the viewer cannot see — do not comment on the visuals ("incredible scene").
+- No exclamation marks. No hype adjectives (amazing, incredible, unbelievable).
 
 ## Input
 
@@ -19,7 +28,7 @@ You MUST output exactly this JSON shape (no markdown, no prose outside the JSON)
   "hook":   "...",
   "events": ["...", "..."],
   "tease":  "...",
-  "cta":    { "template_id": "<from cta_templates.json>", "text": "..." },
+  "cta":    { "template_id": "...", "text": "..." },
   "reveal": "...",
   "translations": {
     "hook": "<中文>",
@@ -30,6 +39,8 @@ You MUST output exactly this JSON shape (no markdown, no prose outside the JSON)
   }
 }
 ```
+
+If the CTA template you were given has `template_id: "none"`, output `"cta": { "template_id": "none", "text": "" }` and **do not write any CTA content**. The tease field can be empty (`""`) if you have no suspense element.
 
 ## Length budget — fill the video
 
@@ -42,24 +53,23 @@ Total spoken English (hook + events + tease + cta + reveal) should be sized to *
 
 ## Rules
 
-1. **hook** — 1 sentence, introduces the main character + central intriguing setup. Past tense. **15-25 words.** Make it surprising or oddly specific (e.g. "This soldier secretly booked the same flight as his father just to mess with him."). Avoid generic openers like "This man tried to..."
-2. **events** — **5-10 sentences** scaling with video length. Each = a single beat of what happened, in chronological order from the scenes. Past tense. **12-20 words each.** Layer in **specific sensory detail** (what objects, who reacted how, what he tried first vs. then) — these details are what makes the commentary feel alive. Pace: short punchy sentence → longer descriptive sentence → short punchy → repeat. Describe ACTIONS and small reactions, not emotions in the abstract.
-3. **tease** — 1 sentence that promises a surprising payoff without giving it away. Must end with a hook phrase like "I'll show you." / "Here's what happened next." / "Watch what he did next." / "But it's what came next that nobody saw coming." Add **micro-suspense** — hint at the *kind* of twist (he won? she cried? something fell?) without revealing it.
-4. **cta** — Pick ONE of the CTA templates you were given (input below). Use its `text` verbatim. The `template_id` must match the template you picked.
-5. **reveal** — 1 sentence. Must be **emotionally suggestive but not literal** — describe the impact, not the thing. Model: "their father experienced the most unforgettable moment of his life." 15-25 words.
+1. **hook** — 1 sentence, introduces the main character + what they are doing. Past tense. **15-25 words.** Make it specific (e.g. "This giant orca popped out of the water just to enjoy a special massage prepared by its caretaker."). Do not use generic openers like "This man tried to..."
+2. **events** — **5-10 sentences** scaling with video length. Each = a single beat of what happened, in chronological order from the scenes. Past tense. **12-20 words each.** Include specific details the viewer can see (what objects, who did what, what happened first vs. then). Short sentence → longer sentence → short → repeat rhythm.
+3. **tease** — optional. 1 sentence that promises a payoff without giving it away. Can be empty string if the story has no suspense element.
+4. **cta** — use the CTA template you were given. If template_id is "none", output empty text.
+5. **reveal** — 1 sentence, **15-25 words**. Step back from the action and close the story — a fact, a reaction, or a "so that's how it ended" observation. **Do not just describe the last event** (that belongs in events). The reveal should feel like a period at the end of the story, not a comma. Examples: "The cat never went near that corner again." / "Nobody in that room moved for a full three seconds." / "The orca slowly slid back into the water and waved its fin goodbye."
 
-## Style — make it gripping
+## Style — voice-style-guide.md rules apply
 
-- Past tense, third person, American English (already covered).
-- **Vary sentence length aggressively.** A short 5-word punch right after a long descriptive line creates rhythm. Don't write 5 sentences of identical 12-word length — that's monotonous.
-- **Use sensory verbs**: "snatched", "slammed", "yanked", "whispered", "crashed", "froze" — beat generic verbs like "took", "did", "looked".
-- **Plant tiny questions** in events. e.g. "He glanced over his shoulder twice — but nobody was there." That trailing clause makes the listener want to keep watching.
-- Don't summarize the story — **stretch it** so the listener stays curious past every event boundary.
-- No moralizing, no narrator opinions ("amazing", "incredible") — show the action, let the viewer feel it.
+- Past tense, third person, American English.
+- **Every word must be one a 15-year-old would use in conversation.** No SAT words.
+- **Use simple verbs**: shook, grabbed, ran, jumped, stared, froze, turned. Not: orchestrated, endeavored, demonstrated, exhibited.
+- No narrator opinions. No "incredible", "amazing". Just describe what happened.
+- No forced humor. No punchlines. Humor comes from the visuals.
 
 ## Additional output: translations
 
-In addition to the English fields above, also output a `translations` object with Chinese translations of every narration section (for human reviewer reference only — NOT used in TTS/audio). The translations help Chinese-speaking reviewers verify the script makes sense without relying on English alone.
+In addition to the English fields above, also output a `translations` object with Chinese translations of every narration section (for human reviewer reference only — NOT used in TTS/audio).
 
 Add it as a sibling of `hook`/`events`/`tease`/`cta`/`reveal`:
 
@@ -73,27 +83,30 @@ Add it as a sibling of `hook`/`events`/`tease`/`cta`/`reveal`:
 }
 ```
 
-The translations must be natural Chinese (not word-for-word literal). `translations.events` must have the same count as `events`. `translations.cta` translates the CTA text only.
+The translations must be natural Chinese (not word-for-word literal). `translations.events` must have the same count as `events`. `translations.cta` translates the CTA text only (empty string if cta is none).
 
 ## Hard constraints
 
 - Pure JSON output. No markdown fences. No trailing commentary.
-- All text in the main fields (`hook`, `events`, `tease`, `cta`, `reveal`) MUST be American English. No Chinese characters in those fields. Chinese is ONLY allowed inside `translations`.
+- All text in the main fields MUST be American English. No Chinese characters in those fields. Chinese is ONLY allowed inside `translations`.
 - No contractions in hook or reveal (feels more cinematic). Contractions OK in events and tease.
 - Zero sponsor plugs, zero merch mentions.
 
-## Reference example (style anchor only — do not copy)
+## Reference example (style anchor — do not copy verbatim)
 
 ```
-hook: "This soldier wanted to surprise his dad on a plane after being away for a long time."
+hook: "This giant orca popped out of the water just to enjoy a special massage prepared by its caretaker."
 events: [
-  "He secretly booked the same flight that his father and brother were taking for their vacation.",
-  "During the flight, he placed his leg on his dad's armrest, teasing him just to get his attention.",
-  "His father noticed and gently moved it away, but he put it back again.",
-  "His brother turned around annoyed until he realized it was actually his own brother.",
-  "He immediately played along and told their dad to get up and confront the person sitting behind them."
+  "As the caretaker gently rubbed its skin, some black scraps started to fall off.",
+  "The caretaker did not worry at all, because it was just its old dead skin peeling off naturally.",
+  "But the next day, after the caretaker finished massaging it, it refused to go back into the water.",
+  "The caretaker had to take out one fish to coax it, but the orca shook its head and turned it down.",
+  "Finally it nodded in satisfaction when the caretaker took out a whole box of fish.",
+  "Later, the aquarium held a concert. No one expected this orca to follow the beat of the music.",
+  "That night, while the caretakers were chatting, the orca suddenly splashed a large amount of water at them.",
+  "When it opened its mouth, the caretakers realized it had held water in its mouth to play a prank."
 ]
-tease: "But when their father finally turned around, something completely unexpected happened. I'll show you."
-cta.text: "But first, who protects you? If you chose the angels, like this video and subscribe to the channel. Those who skip are choosing the devil. If you truly chose the angels, share this video and leave a heart emoji in the comments."
-reveal: "Their father turned around and experienced the most unforgettable moment of his life."
+tease: ""
+cta: { "template_id": "curiosity_follow", "text": "Follow for more stories like this one." }
+reveal: "The orca slowly slid back into the water and waved its fin goodbye."
 ```

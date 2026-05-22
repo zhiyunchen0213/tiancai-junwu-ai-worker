@@ -1,10 +1,15 @@
 # Commentary · 第一视角（First-Person POV）
 
-You are writing a 5-section YouTube Shorts commentary script where the PROTAGONIST narrates in first person (`I / me / my`). Output must be a single valid JSON object (no markdown fences, no trailing text).
+You are writing a YouTube Shorts commentary script where the PROTAGONIST narrates in first person (`I / me / my`). Output must be a single valid JSON object (no markdown fences, no trailing text).
+
+## Voice — MANDATORY
+
+Follow `voice-style-guide.md` strictly. In short: talk like a friend telling their own story. 8th-grade vocabulary. No literary flourishes, no metaphors, no SAT words. One fact per sentence. No exclamation marks.
 
 ## Hard Rules
 
-1. **Five sections**, in order: `hook`, `events`, `tease`, `cta`, `reveal`.
+1. **Sections**, in order: `title_card` (optional), `hook`, `events`, `tease` (optional), `cta` (optional — if template_id is "fp_none", output `{ "template_id": "fp_none", "text": "" }`), `reveal`.
+   - `title_card` is a **visual text overlay** for the editor to burn into the video (e.g., `"POV: You are the orange cat. And nothing is ever your fault."`). It is **NOT spoken** — TTS skips this field entirely. Use it ONLY when the POV setup benefits from an on-screen text card. Leave it out or set to `""` if not needed.
 2. **Language**: `hook`, `events`, `tease`, `cta`, `reveal` text fields are **pure English, zero Chinese characters**. Chinese only in `translations.*` mirror objects.
 3. **First person**: the narrator IS the protagonist, referring to self as `I / me / my`. Do not use third person for the protagonist.
 4. **Tense (mixed / historical present)**:
@@ -24,7 +29,7 @@ You are writing a 5-section YouTube Shorts commentary script where the PROTAGONI
    - tease: 1 sentence
    - cta: whatever the template says
    - reveal: 15-25 words
-8. **No banned adjectives**: don't use `amazing`, `incredible`, `unbelievable` as standalone hype words.
+8. **Voice guide applies**: no banned adjectives (amazing, incredible, unbelievable), no literary devices, no SAT words. Every word must be one a teenager would use.
 9. **Sentence rhythm**: vary sentence length. Don't write 5 sentences of identical 12-word length.
 10. **Grounded in protagonist**: use the PROTAGONIST context (appearance, role_tagline, emotion_arc) to anchor concrete sensory details. E.g., if protagonist wears a leather jacket, you may say `"I felt my jacket zipper catch on the doorframe"` — do NOT fabricate details that contradict the provided appearance.
 
@@ -58,12 +63,14 @@ You will receive JSON:
 {
   "pov_mode": "first_person",
   "protagonist": { "name": "John", "voice_id": null },
+  "title_card": "POV: You are John. And you just made the worst decision of your life.",
   "hook": "...",
   "events": ["...", "...", "..."],
   "tease": "...",
   "cta": { "template_id": "fp_...", "text": "..." },
   "reveal": "...",
   "translations": {
+    "title_card": "...",
     "hook": "...",
     "events": ["...", "...", "..."],
     "tease": "...",

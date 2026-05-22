@@ -4,13 +4,10 @@ import { createHash } from 'crypto';
  * Pick a CTA template deterministically from taskId.
  * Same taskId => same template (stable, survives retries).
  *
- * Accepts object-arg form: { taskId, templates, povMode, forceCtaId }
- *   - templates: flat array (legacy → treated as third_person)
- *                OR grouped object { third_person: [...], first_person: [...] }
- *   - povMode: 'third_person' (default) | 'first_person'
- *   - forceCtaId: optional, locks onto specific template_id (or legacy id)
+ * Rotates through ALL templates (including none) for all directions.
+ * ~25% chance no CTA (none/fp_none), ~75% chance short CTA.
  */
-export function pickCtaTemplate({ taskId, templates, povMode = 'third_person', forceCtaId = null } = {}) {
+export function pickCtaTemplate({ taskId, templates, povMode = 'third_person', forceCtaId = null, direction = null } = {}) {
   const group = Array.isArray(templates)
     ? templates
     : (templates[povMode] || templates.third_person || []);
