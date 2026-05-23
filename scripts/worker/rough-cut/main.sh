@@ -46,11 +46,28 @@ main_loop() {
     echo "$resp" | jq '.plan' > "$plan_json"
 
     local delivery_dir="${DELIVERY_BASE_DIR}/commentary/${task_external_id}"
-    local mp3_url
+    local mp3_url mp3_path target_url
     mp3_url=$(echo "$resp" | jq -r '.narration_mp3_url // empty')
+    mp3_path=$(echo "$resp" | jq -r '.narration_mp3_path // empty')
+    # Provider 优先级:
+    #   1. narration_mp3_url (Kie legacy 公网 URL, 直接 curl)
+    #   2. narration_mp3_path (2026-05-24 豆包路径: VPS 本地 cache 受保护 endpoint,
+    #      worker 拼 ${REVIEW_SERVER_URL}${path} + dispatcher token 走 SSH tunnel 拉)
     if [ -n "$mp3_url" ]; then
+      target_url="$mp3_url"
+    elif [ -n "$mp3_path" ]; then
+      target_url="${REVIEW_SERVER_URL}${mp3_path}"
+    else
+      target_url=""
+    fi
+    if [ -n "$target_url" ]; then
       mkdir -p "$delivery_dir"
-      curl -sSL --max-time 120 -o "${delivery_dir}/NARRATION.mp3" "$mp3_url"
+      curl -sSfL --max-time 120 \
+        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+        -o "${delivery_dir}/NARRATION.mp3" \
+        "$target_url" || {
+          log "WARN: NARRATION.mp3 download failed url=${target_url}"
+        }
     fi
 
     if "${SCRIPT_DIR}/assemble.sh" "${task_external_id}" "$plan_json" 2>/tmp/rc-err.log; then

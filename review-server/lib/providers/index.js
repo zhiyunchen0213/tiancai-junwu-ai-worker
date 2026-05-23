@@ -3,10 +3,16 @@
 
 import * as apimart from './apimart-gemini.js';
 import * as official from './official-gemini.js';
+import * as doubao from './doubao-vlm.js';
 
 const PROVIDERS = {
   apimart,
   official,
+  // doubao-seed-2-0-lite-260428 etc. via ark.cn-beijing.volces.com.
+  // 2026-05-23 ship for video-analysis PoC vs Gemini.
+  // 注意: caller 传 'doubao' 时, 输入 contents 用 Gemini 风格 parts schema,
+  // doubao-vlm.translateGeminiToDoubao 内部翻译成 OpenAI messages schema.
+  doubao,
 };
 
 export function getProvider(name) {

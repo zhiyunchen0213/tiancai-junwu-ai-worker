@@ -503,3 +503,53 @@ export async function analyzeVideoScenes({ url, localPath, providerName, apiKey,
 }
 
 export { getDefaultModel };
+
+/**
+ * 本地视频文件分析 (doubao 版) — PoC 阶段跟 analyzeLocalVideoMarkdown 同函数签名,
+ * 但 providerName 锁死 'doubao' + 多支持 fps 参数 + 返回 audio_tokens.
+ *
+ * 跟 Gemini 版的差别:
+ * 1. 走 doubao chat/completions 不走 Gemini SSE
+ * 2. fps 显式传 (默认 1, doubao spec)
+ * 3. response 含 inputTokens / outputTokens / audioTokens 三维 (给 cost 算)
+ * 4. 不支持 File API, 仅走 inline base64 (≤50MB, 跟 doubao spec 一致)
+ *
+ * @param {object} args
+ * @param {string} args.filePath - VPS 本地 mp4 路径
+ * @param {string} args.apiKey - 火山方舟 ARK_API_KEY (从 getActiveDoubaoKey 取)
+ * @param {string} [args.model='doubao-seed-2-0-lite-260428']
+ * @param {string} args.prompt - 复用 VIDEO_PROMPT 即可 (doubao 接受同一套 JSON 输出指令)
+ * @param {number} [args.fps=1]
+ * @returns {Promise<{markdown:string, model:string, tokenUsage:number, inputTokens:number, outputTokens:number, audioTokens:number|null, sizeBytes:number}>}
+ */
+export async function analyzeLocalVideoMarkdownDoubao({ filePath, apiKey, model, prompt, fps = 1 }) {
+  if (!existsSync(filePath)) {
+    throw new Error(`Source video not found: ${filePath}`);
+  }
+  const buffer = readFileSync(filePath);
+  // doubao base64 inline cap 50MB (vs Gemini 20MB), 但 PoC 样本应远低于此
+  if (buffer.length > 50 * 1024 * 1024) {
+    throw new Error(`视频 ${(buffer.length / 1048576).toFixed(1)}MB 超过 doubao base64 inline 50MB 限制`);
+  }
+  // 走 provider 抽象层 'doubao' (lib/providers/index.js 已注册)
+  const provider = getProvider('doubao');
+  const contents = [{
+    role: 'user',
+    parts: [
+      { inlineData: { mimeType: 'video/mp4', data: buffer.toString('base64') } },
+      { text: prompt },
+    ],
+  }];
+  // doubao 走非流式 (generateContent), 比 SSE 简单且 PoC 阻塞拿完整 markdown 够用
+  const { text, model: usedModel, tokenUsage, inputTokens, outputTokens, audioTokens } =
+    await provider.generateContent({ apiKey, model, contents, fps });
+  return {
+    markdown: text,
+    model: usedModel,
+    tokenUsage,
+    inputTokens,
+    outputTokens,
+    audioTokens,
+    sizeBytes: buffer.length,
+  };
+}
