@@ -63,7 +63,7 @@ export function cleanupTmp(filePath) {
   } catch { /* ignore */ }
 }
 
-const VIDEO_PROMPT = `你是一名顶级的 AI 视频工程专家与资深电影摄影师。你的任务是通过反向推导视频，输出结构化的分析结果。
+export const VIDEO_PROMPT = `你是一名顶级的 AI 视频工程专家与资深电影摄影师。你的任务是通过反向推导视频，输出结构化的分析结果。
 
 执行核心准则：
 - 客观拆解：严禁主观臆断
