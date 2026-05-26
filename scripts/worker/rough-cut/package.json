@@ -1,9 +1,0 @@
-{
-  "name": "rough-cut-worker",
-  "version": "1.0.0",
-  "type": "module",
-  "description": "macking rough-cut worker R2 upload dependency",
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.0.0"
-  }
-}

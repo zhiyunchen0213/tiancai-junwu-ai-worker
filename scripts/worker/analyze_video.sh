@@ -142,9 +142,14 @@ while [[ $ATTEMPT -le $MAX_RETRIES ]]; do
     echo "分析尝试 $ATTEMPT/$MAX_RETRIES..."
 
     # 注: source video 必须早就上传到 VPS (worker_main.sh 在 download_and_extract 后跑 upload).
-    # 端点超时给 5 分钟 (Gemini 视频分析最长见过 90s, 5 分钟兜底安全).
+    # 端点超时给 12 分钟 — server 端 enricher 走 doubao 单次可达 600s timeout (实测 5/25 治本
+    # 前 av1+base64 路径都是 600s timeout fetch failed), 加 Gemini fallback ~10s + buffer.
+    # 之前 300s curl 比 server doubao 短一倍, race 让 enricher Gemini fallback 成功但
+    # worker 已 timeout 上报失败, source_analysis 写库了 task.status=failed (实战
+    # t-mpl70b7z / t-mpl6zwvi, 5/25 21:38 提交). R2 治本后正常路径 doubao 秒级, 此 timeout 仅
+    # 兜失败/降级路径不影响正常 latency.
     HTTP_CODE=$(curl --silent --output "$ANALYSIS_LOG.raw" --write-out '%{http_code}' \
-        --max-time 300 \
+        --max-time 720 \
         -X POST \
         -H "Authorization: Bearer $DISPATCHER_TOKEN" \
         -H "Content-Type: application/json" \
