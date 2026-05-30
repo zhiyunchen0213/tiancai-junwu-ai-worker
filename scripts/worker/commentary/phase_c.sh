@@ -105,46 +105,33 @@ PYEOF
     ORIG_HAS_AUDIO=1
   fi
 
-  # 4. ffmpeg assemble: 9:16 original (video untouched) + narration.mp3 overlay + SRT burn-in
-  # SRT path must be absolute and colon-escaped for libavfilter subtitles filter.
-  SRT_ABS=""
-  if [[ $HAS_SRT -eq 1 ]]; then
-    SRT_ABS=$(realpath "$NARRATION_SRT")
-    # Escape colons and backslashes in path (libavfilter subtitles= quoting)
-    SRT_ESCAPED="${SRT_ABS//\\/\\\\}"
-    SRT_ESCAPED="${SRT_ESCAPED//:/\\:}"
-  fi
-
+  # 4. ffmpeg assemble: 9:16 original video (stream copy, no re-encode) + narration.mp3 audio mix.
+  # NOTE: subtitle burn-in deliberately removed (2026-05-30). The worker ffmpeg build does NOT
+  # have libass/libfreetype enabled (brew ffmpeg 8.0.1 slim build), so subtitles= filter would
+  # fail at runtime. Sidecar SRT delivery is also consistent with commentary-remix flow — the
+  # employee imports narration.srt into 剪映/Premiere for styled subtitle burn-in at edit time
+  # (gives them control over font/color/position for each video). SRT is still uploaded to R2
+  # alongside final.mp4 by upload_r2.mjs.
   if [[ $ORIG_HAS_AUDIO -eq 1 ]]; then
     # Mix original audio at -10dB (volume=0.2) with narration at +3.5dB (volume=1.5)
-    if [[ $HAS_SRT -eq 1 ]]; then
-      FILTER_COMPLEX="[0:a]volume=0.2[orig_a];[1:a]volume=1.5[narr_a];[orig_a][narr_a]amix=inputs=2:duration=longest[a_out];[0:v]subtitles='${SRT_ESCAPED}':force_style='FontName=Source Han Sans CN Bold,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Alignment=2,MarginV=80'[v_out]"
-    else
-      FILTER_COMPLEX="[0:a]volume=0.2[orig_a];[1:a]volume=1.5[narr_a];[orig_a][narr_a]amix=inputs=2:duration=longest[a_out];[0:v]copy[v_out]"
-    fi
-    AUDIO_MAPS=(-map "[v_out]" -map "[a_out]")
+    FILTER_COMPLEX="[0:a]volume=0.2[orig_a];[1:a]volume=1.5[narr_a];[orig_a][narr_a]amix=inputs=2:duration=longest[a_out]"
   else
-    # No original audio — just use narration directly
+    # No original audio — just narration boosted
     echo "[phase_c] original.mp4 has no audio track, using narration only" >&2
-    if [[ $HAS_SRT -eq 1 ]]; then
-      FILTER_COMPLEX="[1:a]volume=1.5[a_out];[0:v]subtitles='${SRT_ESCAPED}':force_style='FontName=Source Han Sans CN Bold,FontSize=14,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,Outline=2,Alignment=2,MarginV=80'[v_out]"
-    else
-      FILTER_COMPLEX="[1:a]volume=1.5[a_out];[0:v]copy[v_out]"
-    fi
-    AUDIO_MAPS=(-map "[v_out]" -map "[a_out]")
+    FILTER_COMPLEX="[1:a]volume=1.5[a_out]"
   fi
 
-  echo "[phase_c] running ffmpeg assembly (has_audio=${ORIG_HAS_AUDIO}, has_srt=${HAS_SRT})"
+  echo "[phase_c] running ffmpeg assembly (has_audio=${ORIG_HAS_AUDIO}, has_srt=${HAS_SRT}, srt=sidecar)"
   ffmpeg -y \
     -i "$WORK_DIR/original.mp4" \
     -i "$WORK_DIR/narration.mp3" \
     -filter_complex "$FILTER_COMPLEX" \
-    "${AUDIO_MAPS[@]}" \
-    -c:v libx264 -preset medium -crf 18 \
+    -map 0:v -map "[a_out]" \
+    -c:v copy \
     -c:a aac -b:a 192k \
     -movflags +faststart \
     "$WORK_DIR/final.mp4"
-  echo "[phase_c] ffmpeg assembly done: $WORK_DIR/final.mp4"
+  echo "[phase_c] ffmpeg assembly done: $WORK_DIR/final.mp4 (SRT sidecar: $NARRATION_SRT)"
 
   # 5. Upload final.mp4 (+ narration.srt if present) to R2
   node "$SCRIPT_DIR/upload_r2.mjs" "$WORK_DIR" "$TASK_ID"
