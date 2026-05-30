@@ -35,12 +35,21 @@ TRACK=$(python3 -c "import sys,json;print(json.load(open('$TASK_FILE')).get('tra
 if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
   echo "[phase_a] kindness-reversal-commentary mode, source_task_id=$SOURCE_TASK_ID"
 
-  # 1. Fetch source video from VPS (R2-backed via /source-video)
+  if [[ -z "$SOURCE_TASK_ID" ]]; then
+    echo "[phase_a] FATAL: kindness-reversal-commentary task missing source_task_id" >&2
+    exit 1
+  fi
+
+  # 1. Fetch source video from VPS (R2-backed via /source-video).
+  # IMPORTANT: source video is stored at SOURCE_TASK_ID's R2 prefix (the original
+  # kindness-reversal task), not our commentary task's prefix. The /source-video
+  # endpoint only knows about ${pathTaskId}'s own storage, so we must request by
+  # source_task_id.
   curl -fsS -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
-    "${REVIEW_SERVER_URL}/api/v1/tasks/${TASK_ID}/source-video" \
+    "${REVIEW_SERVER_URL}/api/v1/tasks/${SOURCE_TASK_ID}/source-video" \
     -o "$WORK_DIR/original.mp4"
   if [[ ! -s "$WORK_DIR/original.mp4" ]]; then
-    echo "[phase_a] failed to fetch source video for $TASK_ID" >&2
+    echo "[phase_a] failed to fetch source video for source_task_id=$SOURCE_TASK_ID" >&2
     exit 1
   fi
 
