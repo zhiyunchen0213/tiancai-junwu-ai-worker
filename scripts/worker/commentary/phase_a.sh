@@ -59,6 +59,13 @@ if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
   # generate_script.mjs (ANTHROPIC_API_KEY, CLAUDE_*) are exported by configure_phase_a_providers.sh.
   export REVIEW_SERVER_URL DISPATCHER_TOKEN
 
+  # Force bearer auth for ClaudeClient. configure_phase_a_providers.sh sets
+  # CLAUDE_AUTH_MODE=anthropic (x-api-key header) for non-kie providers, but if
+  # fetch_provider returns the Apimart-Claude-ChatCompletions row, the endpoint
+  # /v1/chat/completions only accepts Authorization: Bearer. Bearer works for
+  # both apimart /v1/messages and /v1/chat/completions, so this is a safe override.
+  export CLAUDE_AUTH_MODE=bearer
+
   # 2. Doubao video analysis (non-fatal on failure)
   node "$SCRIPT_DIR/doubao_video_analyzer.mjs" "$WORK_DIR" "$TASK_ID" || true
 
