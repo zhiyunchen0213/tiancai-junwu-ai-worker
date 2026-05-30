@@ -53,6 +53,12 @@ if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
     exit 1
   fi
 
+  # .production.env declares REVIEW_SERVER_URL + DISPATCHER_TOKEN as bare vars (not exported),
+  # so child node processes can't see them. Explicitly export here for doubao_video_analyzer.mjs
+  # (which reads process.env.REVIEW_SERVER_URL + DISPATCHER_TOKEN). The other vars used by
+  # generate_script.mjs (ANTHROPIC_API_KEY, CLAUDE_*) are exported by configure_phase_a_providers.sh.
+  export REVIEW_SERVER_URL DISPATCHER_TOKEN
+
   # 2. Doubao video analysis (non-fatal on failure)
   node "$SCRIPT_DIR/doubao_video_analyzer.mjs" "$WORK_DIR" "$TASK_ID" || true
 
