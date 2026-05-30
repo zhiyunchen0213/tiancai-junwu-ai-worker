@@ -1,0 +1,9 @@
+{
+  "name": "worker-lib",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Worker shared lib (doubao-tts.mjs WebSocket client) — ws dep required at this level for ESM resolution from doubao-tts.mjs",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
