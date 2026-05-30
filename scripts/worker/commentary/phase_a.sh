@@ -59,11 +59,15 @@ if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
   # generate_script.mjs (ANTHROPIC_API_KEY, CLAUDE_*) are exported by configure_phase_a_providers.sh.
   export REVIEW_SERVER_URL DISPATCHER_TOKEN
 
-  # Force bearer auth for ClaudeClient. configure_phase_a_providers.sh sets
-  # CLAUDE_AUTH_MODE=anthropic (x-api-key header) for non-kie providers, but if
-  # fetch_provider returns the Apimart-Claude-ChatCompletions row, the endpoint
-  # /v1/chat/completions only accepts Authorization: Bearer. Bearer works for
-  # both apimart /v1/messages and /v1/chat/completions, so this is a safe override.
+  # Pin Claude endpoint to apimart /v1/messages (Anthropic-style response) for
+  # ClaudeClient compatibility. configure_phase_a_providers.sh may return the
+  # Apimart-Claude-ChatCompletions row which sets CLAUDE_ENDPOINT to
+  # /v1/chat/completions — that returns OpenAI shape (choices[0].message.content)
+  # but ClaudeClient.generateScript() only parses Anthropic shape (content[].text).
+  # Pinning to /v1/messages + bearer auth works regardless of which DB row
+  # fetch_provider returned. This is consistent with feedback_apimart_chat_completions_translate_unreliable
+  # — caller-side override to bypass the chat-completions endpoint.
+  export CLAUDE_ENDPOINT="https://api.apimart.ai/v1/messages"
   export CLAUDE_AUTH_MODE=bearer
 
   # 2. Doubao video analysis (non-fatal on failure)
