@@ -55,6 +55,14 @@ if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
   export VOLC_TTS_API_KEY REVIEW_SERVER_URL DISPATCHER_TOKEN \
          R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_PUBLIC_BASE
 
+  # Force Chinese voice for kindness narration (天才说书人 第三人称中文叙述).
+  # tts_narration.mjs default is en_female_dacey_uranus_bigtts (English voice)
+  # which produces 0 bytes when fed Chinese text (language mismatch).
+  # zh_male_M392_conversation_wvae_bigtts is Doubao's common Chinese male
+  # conversational voice — suitable for narrative storytelling tone.
+  export COMMENTARY_TTS_VOICE_ID="${COMMENTARY_TTS_VOICE_ID:-zh_male_M392_conversation_wvae_bigtts}"
+  export COMMENTARY_LANGUAGE_CODE="${COMMENTARY_LANGUAGE_CODE:-zh}"
+
   # 1. TTS → narration.mp3 (豆包 seed-tts-2.0-expressive)
   node "$SCRIPT_DIR/tts_narration.mjs" "$WORK_DIR"
 
