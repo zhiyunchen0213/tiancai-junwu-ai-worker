@@ -1,0 +1,9 @@
+{
+  "name": "commentary-worker",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "commentary worker R2 upload dependency",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  }
+}

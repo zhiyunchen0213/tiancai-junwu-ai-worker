@@ -29,6 +29,66 @@ cp "$TASK_FILE" "$WORK_DIR/task.json"
 # Export per-task COMMENTARY_* overrides from video_metadata.commentary_params
 _TASK_JSON_FILE="$TASK_FILE" source "$SCRIPT_DIR/lib/export_params.sh"
 
+SOURCE_TASK_ID=$(python3 -c "import sys,json;print(json.load(open('$TASK_FILE')).get('source_task_id') or '')")
+TRACK=$(python3 -c "import sys,json;print(json.load(open('$TASK_FILE')).get('track') or '')")
+
+if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
+  echo "[phase_a] kindness-reversal-commentary mode, source_task_id=$SOURCE_TASK_ID"
+
+  # 1. Fetch source video from VPS (R2-backed via /source-video)
+  curl -fsS -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+    "${REVIEW_SERVER_URL}/api/v1/tasks/${TASK_ID}/source-video" \
+    -o "$WORK_DIR/original.mp4"
+  if [[ ! -s "$WORK_DIR/original.mp4" ]]; then
+    echo "[phase_a] failed to fetch source video for $TASK_ID" >&2
+    exit 1
+  fi
+
+  # 2. Doubao video analysis (non-fatal on failure)
+  node "$SCRIPT_DIR/doubao_video_analyzer.mjs" "$WORK_DIR" "$TASK_ID" || true
+
+  # 3. Generate script
+  node "$SCRIPT_DIR/generate_script.mjs" "$WORK_DIR"
+  if [[ ! -s "$WORK_DIR/script.json" ]]; then
+    echo "[phase_a] script.json missing or empty" >&2
+    exit 1
+  fi
+
+  # 4. Report phase_a_complete (same shape as commentary-remix)
+  REPORT_PAYLOAD=$(python3 -c "
+import json, sys
+script = json.load(open('$WORK_DIR/script.json'))
+doubao_analysis_path = '$WORK_DIR/doubao_analysis.json'
+import os
+doubao = json.load(open(doubao_analysis_path)) if os.path.exists(doubao_analysis_path) else None
+payload = {
+  'task_id': '$TASK_ID',
+  'event': 'commentary_phase_a_complete',
+  'payload': {
+    'script': script,
+    'sub_track': 'kindness-reversal-commentary',
+    'doubao_analysis_available': doubao is not None and not doubao.get('_skip_reason'),
+  },
+}
+print(json.dumps(payload))
+")
+
+  for attempt in 1 2 3; do
+    if curl -fsS -X POST "${REVIEW_SERVER_URL}/api/v1/tasks/report" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+        -d "$REPORT_PAYLOAD" > "$WORK_DIR/report_a.json"; then
+      echo "[phase_a] OK reported"
+      exit 0
+    fi
+    echo "[phase_a] report attempt $attempt failed"
+    sleep $((attempt * 2))
+  done
+  echo "[phase_a] FAIL to report after 3 attempts"
+  exit 1
+fi
+
+# Existing commentary-remix path follows...
 if [[ "$VIDEO_URL" == uploaded://* ]]; then
   # Pull via HTTP API — works for localhost dev and remote VPS alike.
   curl -fsS -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \

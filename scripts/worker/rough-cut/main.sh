@@ -71,16 +71,36 @@ main_loop() {
     fi
 
     if "${SCRIPT_DIR}/assemble.sh" "${task_external_id}" "$plan_json" 2>/tmp/rc-err.log; then
-      local draft_path="${task_external_id}/draft.mp4"
-      local clips_count size_bytes
-      clips_count=$(find "${delivery_dir}/clips" -name '*.mp4' | wc -l | tr -d ' ')
-      size_bytes=$(find "${delivery_dir}" -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1} END {print s}')
-      report_rough_cut "$task_id" "rough_cut_ready" "$(jq -n \
-        --arg p "$draft_path" \
-        --argjson c "$clips_count" \
-        --argjson s "${size_bytes:-0}" \
-        '{draft_mp4_path: $p, clips_count: $c, total_size_bytes: $s}')"
-      log "rough_cut_ready task ${task_id}"
+      local manifest_file="/tmp/r2-manifest-${task_id}.json"
+      local upload_err_file="/tmp/r2-upload-err-${task_id}.log"
+      if /opt/homebrew/bin/node "${SCRIPT_DIR}/upload_r2.mjs" "${task_external_id}" "${delivery_dir}" > "$manifest_file" 2> "$upload_err_file"; then
+        local manifest_json
+        manifest_json=$(cat "$manifest_file")
+        local draft_path="${task_external_id}/draft.mp4"
+        local clips_count size_bytes
+        clips_count=$(find "${delivery_dir}/clips" -name '*.mp4' 2>/dev/null | wc -l | tr -d ' ')
+        size_bytes=$(find "${delivery_dir}" -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1} END {print s}')
+        report_rough_cut "$task_id" "rough_cut_ready" "$(jq -n \
+          --arg p "$draft_path" \
+          --argjson c "$clips_count" \
+          --argjson s "${size_bytes:-0}" \
+          --argjson m "$manifest_json" \
+          '{draft_mp4_path: $p, clips_count: $c, total_size_bytes: $s, r2_manifest: $m}')"
+        log "rough_cut_ready task ${task_id} (manifest $(echo "$manifest_json" | jq '.files|length') files)"
+      else
+        local upload_exit
+        upload_exit=$?
+        local upload_err
+        upload_err=$(cat "$upload_err_file" | tail -c 500)
+        local reason
+        if [ "$upload_exit" -eq 2 ]; then
+          reason="r2_credentials_missing"
+        else
+          reason="r2_upload_failed: ${upload_err}"
+        fi
+        report_rough_cut "$task_id" "failed_rough_cut" "$(jq -n --arg e "$reason" '{error: $e}')"
+        log "failed_rough_cut task ${task_id} (upload exit=${upload_exit}): ${reason}"
+      fi
     else
       local err
       err=$(cat /tmp/rc-err.log | tail -c 500)
