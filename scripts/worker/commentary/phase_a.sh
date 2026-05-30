@@ -40,40 +40,27 @@ if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
     exit 1
   fi
 
-  # 1. Fetch source video from VPS (R2-backed via /source-video).
-  # IMPORTANT: source video is stored at SOURCE_TASK_ID's R2 prefix (the original
-  # kindness-reversal task), not our commentary task's prefix. The /source-video
-  # endpoint only knows about ${pathTaskId}'s own storage, so we must request by
-  # source_task_id.
-  curl -fsS -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
-    "${REVIEW_SERVER_URL}/api/v1/tasks/${SOURCE_TASK_ID}/source-video" \
-    -o "$WORK_DIR/original.mp4"
-  if [[ ! -s "$WORK_DIR/original.mp4" ]]; then
-    echo "[phase_a] failed to fetch source video for source_task_id=$SOURCE_TASK_ID" >&2
-    exit 1
-  fi
+  # Phase A is text-only: generate English narration script from story_document
+  # (already in task.json) + optional Doubao Vision analysis of the OG Seedance
+  # source video (which is still on R2 at source-videos/<source_task_id>/original.mp4).
+  # We do NOT yt-dlp the published video here — that's deferred to phase_c where
+  # the actual employee final cut is bundled into the commentary pack zip.
+  cp "$TASK_FILE" "$WORK_DIR/task.json"
 
-  # .production.env declares REVIEW_SERVER_URL + DISPATCHER_TOKEN as bare vars (not exported),
-  # so child node processes can't see them. Explicitly export here for doubao_video_analyzer.mjs
-  # (which reads process.env.REVIEW_SERVER_URL + DISPATCHER_TOKEN). The other vars used by
-  # generate_script.mjs (ANTHROPIC_API_KEY, CLAUDE_*) are exported by configure_phase_a_providers.sh.
+  # .production.env declares vars as bare (not exported); child node procs need them.
   export REVIEW_SERVER_URL DISPATCHER_TOKEN
 
-  # Pin Claude endpoint to apimart /v1/messages (Anthropic-style response) for
-  # ClaudeClient compatibility. configure_phase_a_providers.sh may return the
-  # Apimart-Claude-ChatCompletions row which sets CLAUDE_ENDPOINT to
-  # /v1/chat/completions — that returns OpenAI shape (choices[0].message.content)
-  # but ClaudeClient.generateScript() only parses Anthropic shape (content[].text).
-  # Pinning to /v1/messages + bearer auth works regardless of which DB row
-  # fetch_provider returned. This is consistent with feedback_apimart_chat_completions_translate_unreliable
-  # — caller-side override to bypass the chat-completions endpoint.
+  # Pin Claude endpoint to apimart /v1/messages (Anthropic-style response) — ClaudeClient
+  # only parses Anthropic shape. See feedback_apimart_chat_completions_translate_unreliable.
   export CLAUDE_ENDPOINT="https://api.apimart.ai/v1/messages"
   export CLAUDE_AUTH_MODE=bearer
 
-  # 2. Doubao video analysis (non-fatal on failure)
+  # 1. Doubao Vision analysis of OG Seedance source video (non-fatal, supplementary
+  # input for narration timing/expression details). VPS endpoint internally resolves
+  # source_task_id and pulls from source-videos/<source_task_id>/original.mp4 on R2.
   node "$SCRIPT_DIR/doubao_video_analyzer.mjs" "$WORK_DIR" "$TASK_ID" || true
 
-  # 3. Generate script
+  # 2. Generate English narration script (天才说书人 voice).
   node "$SCRIPT_DIR/generate_script.mjs" "$WORK_DIR"
   if [[ ! -s "$WORK_DIR/script.json" ]]; then
     echo "[phase_a] script.json missing or empty" >&2

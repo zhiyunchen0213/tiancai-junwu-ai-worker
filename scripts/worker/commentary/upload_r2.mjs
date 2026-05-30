@@ -56,8 +56,13 @@ async function putFile(client, bucket, r2Key, absPath, contentType) {
 }
 
 /**
- * Upload final.mp4 (and narration.srt if present) to R2.
- * Writes r2_manifest.json to workDir.
+ * Upload commentary pack zip (the primary deliverable) + standalone narration.mp3
+ * and narration.srt (for inspection / future re-pack) to R2. Writes r2_manifest.json
+ * to workDir.
+ *
+ * Primary deliverable is kindness-commentary-pack.zip — employee downloads this and
+ * runs local edit (剪映 / Premiere). Standalone files are kept for ops debugging
+ * and possible direct preview without unzip.
  */
 export async function uploadKindnessCommentaryToR2(workDir, taskId) {
   const client = getR2Client();
@@ -65,33 +70,54 @@ export async function uploadKindnessCommentaryToR2(workDir, taskId) {
   const uploadedAt = new Date().toISOString();
   const manifest = {};
 
-  // 1. Upload final.mp4 (required)
-  const finalMp4Path = join(workDir, 'final.mp4');
-  const mp4R2Key = `commentary/${taskId}/final.mp4`;
-  console.error(`[upload_r2] PUT ${mp4R2Key}`);
-  const mp4Size = await putFile(client, bucket, mp4R2Key, finalMp4Path, 'video/mp4');
-  manifest.final_mp4 = { r2_key: mp4R2Key, size_bytes: mp4Size, uploaded_at: uploadedAt };
-  console.error(`[upload_r2] final.mp4 OK (${mp4Size} bytes)`);
+  // 1. Upload the pack zip (REQUIRED — the primary deliverable)
+  const zipPath = join(workDir, 'kindness-commentary-pack.zip');
+  const zipR2Key = `commentary/${taskId}/kindness-commentary-pack.zip`;
+  console.error(`[upload_r2] PUT ${zipR2Key}`);
+  const zipSize = await putFile(client, bucket, zipR2Key, zipPath, 'application/zip');
+  manifest.pack_zip = { r2_key: zipR2Key, size_bytes: zipSize, uploaded_at: uploadedAt };
+  console.error(`[upload_r2] pack zip OK (${zipSize} bytes)`);
 
-  // 2. Upload narration.srt if present (best-effort, no fail if missing)
+  // 2. Upload narration.mp3 standalone (best-effort, for preview/debug)
+  const mp3Path = join(workDir, 'narration.mp3');
+  try {
+    await stat(mp3Path);
+    const mp3R2Key = `commentary/${taskId}/narration.mp3`;
+    console.error(`[upload_r2] PUT ${mp3R2Key}`);
+    const mp3Size = await putFile(client, bucket, mp3R2Key, mp3Path, 'audio/mpeg');
+    manifest.narration_mp3 = { r2_key: mp3R2Key, size_bytes: mp3Size, uploaded_at: uploadedAt };
+    console.error(`[upload_r2] narration.mp3 OK (${mp3Size} bytes)`);
+  } catch (_) {
+    console.error('[upload_r2] narration.mp3 not found — skipping');
+  }
+
+  // 3. Upload narration.srt standalone (best-effort)
   const srtPath = join(workDir, 'narration.srt');
-  let srtExists = false;
   try {
     await stat(srtPath);
-    srtExists = true;
-  } catch (_) { /* not present */ }
-
-  if (srtExists) {
     const srtR2Key = `commentary/${taskId}/narration.srt`;
     console.error(`[upload_r2] PUT ${srtR2Key}`);
     const srtSize = await putFile(client, bucket, srtR2Key, srtPath, 'text/plain; charset=utf-8');
     manifest.subtitles_srt = { r2_key: srtR2Key, size_bytes: srtSize, uploaded_at: uploadedAt };
     console.error(`[upload_r2] narration.srt OK (${srtSize} bytes)`);
-  } else {
-    console.error('[upload_r2] narration.srt not found — skipping subtitle upload');
+  } catch (_) {
+    console.error('[upload_r2] narration.srt not found — skipping');
   }
 
-  // 3. Write manifest to work_dir
+  // 4. Upload metadata.json standalone (best-effort, for direct read without unzip)
+  const metadataPath = join(workDir, 'metadata.json');
+  try {
+    await stat(metadataPath);
+    const metaR2Key = `commentary/${taskId}/metadata.json`;
+    console.error(`[upload_r2] PUT ${metaR2Key}`);
+    const metaSize = await putFile(client, bucket, metaR2Key, metadataPath, 'application/json');
+    manifest.metadata_json = { r2_key: metaR2Key, size_bytes: metaSize, uploaded_at: uploadedAt };
+    console.error(`[upload_r2] metadata.json OK (${metaSize} bytes)`);
+  } catch (_) {
+    console.error('[upload_r2] metadata.json not found — skipping');
+  }
+
+  // 5. Write manifest to work_dir
   const manifestPath = join(workDir, 'r2_manifest.json');
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
   console.error(`[upload_r2] r2_manifest.json written`);

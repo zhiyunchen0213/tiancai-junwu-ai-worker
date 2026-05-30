@@ -110,57 +110,83 @@ PYEOF
     echo "[phase_c:srt] script.json missing, cannot build SRT" >&2
   fi
 
-  # 3. Detect whether original.mp4 has an audio stream (真善美 videos always do,
-  # but guard defensively — ffmpeg filter [0:a] errors out if track is absent)
-  ORIG_HAS_AUDIO=0
-  if ffprobe -v error -select_streams a:0 -show_entries stream=codec_type \
-      -of default=nw=1:nk=1 "$WORK_DIR/original.mp4" 2>/dev/null | grep -q "audio"; then
-    ORIG_HAS_AUDIO=1
-  fi
-
-  # 4. ffmpeg assemble: 9:16 original video (stream copy, no re-encode) + narration.mp3 audio mix.
-  # NOTE: subtitle burn-in deliberately removed (2026-05-30). The worker ffmpeg build does NOT
-  # have libass/libfreetype enabled (brew ffmpeg 8.0.1 slim build), so subtitles= filter would
-  # fail at runtime. Sidecar SRT delivery is also consistent with commentary-remix flow — the
-  # employee imports narration.srt into 剪映/Premiere for styled subtitle burn-in at edit time
-  # (gives them control over font/color/position for each video). SRT is still uploaded to R2
-  # alongside final.mp4 by upload_r2.mjs.
-  if [[ $ORIG_HAS_AUDIO -eq 1 ]]; then
-    # Mix original audio at -10dB (volume=0.2) with narration at +3.5dB (volume=1.5)
-    FILTER_COMPLEX="[0:a]volume=0.2[orig_a];[1:a]volume=1.5[narr_a];[orig_a][narr_a]amix=inputs=2:duration=longest[a_out]"
+  # 3. Fetch new YouTube metadata (Claude rewrite) via VPS endpoint. Synchronous so
+  # metadata.json can go IN the zip. Non-fatal: if it fails we still ship the zip
+  # without metadata.json (frontend can offer [重生 metadata] later).
+  METADATA_JSON="$WORK_DIR/metadata.json"
+  if curl -fsS -X POST -H "Authorization: Bearer ${DISPATCHER_TOKEN}" \
+      "${REVIEW_SERVER_URL}/api/v1/internal/kindness-commentary-metadata/${TASK_ID}" \
+      -o "$METADATA_JSON" 2>"$WORK_DIR/metadata.err"; then
+    if [[ -s "$METADATA_JSON" ]]; then
+      echo "[phase_c:metadata] fetched ($(wc -c < "$METADATA_JSON") bytes)"
+    else
+      echo "[phase_c:metadata] empty response, dropping from zip" >&2
+      rm -f "$METADATA_JSON"
+    fi
   else
-    # No original audio — just narration boosted
-    echo "[phase_c] original.mp4 has no audio track, using narration only" >&2
-    FILTER_COMPLEX="[1:a]volume=1.5[a_out]"
+    echo "[phase_c:metadata] fetch failed, dropping from zip: $(cat "$WORK_DIR/metadata.err" 2>/dev/null | head -1)" >&2
+    rm -f "$METADATA_JSON"
   fi
 
-  echo "[phase_c] running ffmpeg assembly (has_audio=${ORIG_HAS_AUDIO}, has_srt=${HAS_SRT}, srt=sidecar)"
-  ffmpeg -y \
-    -i "$WORK_DIR/original.mp4" \
-    -i "$WORK_DIR/narration.mp3" \
-    -filter_complex "$FILTER_COMPLEX" \
-    -map 0:v -map "[a_out]" \
-    -c:v copy \
-    -c:a aac -b:a 192k \
-    -movflags +faststart \
-    "$WORK_DIR/final.mp4"
-  echo "[phase_c] ffmpeg assembly done: $WORK_DIR/final.mp4 (SRT sidecar: $NARRATION_SRT)"
+  # 4. Build README.txt with employee instructions for the zip pack.
+  cat > "$WORK_DIR/README.txt" <<'README'
+真善美 → 解说赛道 剪辑包
 
-  # 5. Upload final.mp4 (+ narration.srt if present) to R2
+文件清单
+========
+- published.mp4   : 你之前剪辑发布到 YouTube 的真善美短视频成片 (yt-dlp 抓取)
+- narration.mp3   : AI 生成的英文解说配音 (天才说书人 voice, Dacey)
+- narration.srt   : 解说字幕 (含时间戳 + 英文文本)
+- metadata.json   : 推荐的新 YouTube 元数据 (title / description / tags / cover_overlay_text)
+                    避免 reuse-content policy 命中, 标题/描述/标签都重新设计
+
+剪辑建议 (剪映 / Premiere)
+==========================
+1. 把 published.mp4 拖进时间线
+2. 把 narration.mp3 拖进音频轨道:
+   - 原视频音轨降到 ~20% 音量 (-14dB)
+   - narration 升到 ~150% 音量 (+3.5dB)
+3. narration 时长可能超过视频:
+   - 如果超 → 选用最关键的片段, 其它配重要画面
+   - 或对原视频做 1.1-1.3x 加速来对齐 narration 节奏
+4. 把 narration.srt 导入字幕轨道, 选你喜欢的字体/颜色/位置
+5. 导出新成片
+6. 上传 YouTube 时使用 metadata.json 里的 title/description/tags
+   ⚠️ 重要: 不要用原 published 视频的标题或描述, YouTube reuse content policy 会判同质化
+
+注意
+====
+- 同一条 source 真善美任务最多复用 2 次 (env cap)
+- 必须推到跟原 channel 不同的 YouTube 频道, 避免账号关联触发同质化检测
+README
+  echo "[phase_c] README.txt written"
+
+  # 5. Build commentary pack zip {published.mp4, narration.mp3, narration.srt, metadata.json?, README.txt}
+  PACK_ZIP="$WORK_DIR/kindness-commentary-pack.zip"
+  cp "$WORK_DIR/original.mp4" "$WORK_DIR/published.mp4"
+  # Use stored zip (no compression) — mp4/mp3 are already compressed, gain ~0%.
+  # -j: junk paths (don't include $WORK_DIR/ prefix in zip)
+  ZIP_FILES=(-j "$WORK_DIR/published.mp4" "$WORK_DIR/narration.mp3")
+  [[ -f "$NARRATION_SRT" ]] && ZIP_FILES+=("$NARRATION_SRT")
+  [[ -f "$METADATA_JSON" ]] && ZIP_FILES+=("$METADATA_JSON")
+  ZIP_FILES+=("$WORK_DIR/README.txt")
+  rm -f "$PACK_ZIP"
+  zip -0 "$PACK_ZIP" "${ZIP_FILES[@]}" > "$WORK_DIR/zip.log" 2>&1
+  ZIP_SIZE=$(wc -c < "$PACK_ZIP" | tr -d ' ')
+  ZIP_MB=$(( ZIP_SIZE / 1024 / 1024 ))
+  echo "[phase_c] zip built: $PACK_ZIP (${ZIP_MB}MB, $(unzip -l "$PACK_ZIP" 2>/dev/null | tail -1 | awk '{print $2}') files)"
+
+  # 6. Upload zip to R2 (also keep narration.mp3 + narration.srt as standalone files for inspection)
   node "$SCRIPT_DIR/upload_r2.mjs" "$WORK_DIR" "$TASK_ID"
 
-  # 6. Report commentary_phase_c_complete with R2 manifest
+  # 7. Report commentary_phase_c_complete with R2 manifest
   NARRATION_SEC=$(ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 \
     "$WORK_DIR/narration.mp3" 2>/dev/null || echo "0")
-  R2_MANIFEST=$(cat "$WORK_DIR/r2_manifest.json")
 
   REPORT_PAYLOAD=$(python3 -c "
 import json, sys
 manifest = json.load(open('$WORK_DIR/r2_manifest.json'))
-final_r2_key = (manifest.get('final_mp4') or {}).get('r2_key', '')
-# Include script.json so VPS metadata hook can extract narration text.
-# script.json = [{start_sec, end_sec, text}, ...] from Task 10's generate_script.mjs.
-# The file is guaranteed to exist here (step 2 SRT generation already read it).
+zip_r2_key = (manifest.get('pack_zip') or {}).get('r2_key', '')
 try:
     script = json.load(open('$WORK_DIR/script.json'))
 except Exception as e:
@@ -171,7 +197,7 @@ payload = {
     'event': 'commentary_phase_c_complete',
     'payload': {
         'r2_manifest': manifest,
-        'delivery_path': 'r2://' + final_r2_key,
+        'delivery_path': 'r2://' + zip_r2_key,
         'narration_duration_sec': float('$NARRATION_SEC' or 0),
         'script': script,
         'sub_track': 'kindness-reversal-commentary',
