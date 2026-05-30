@@ -49,6 +49,12 @@ fi
 if [[ "$TRACK" == "kindness-reversal-commentary" ]]; then
   echo "[phase_c] kindness-reversal-commentary 9:16 assembly mode"
 
+  # .production.env declares VOLC_TTS_API_KEY + REVIEW_SERVER_URL + DISPATCHER_TOKEN
+  # + R2_* as bare vars (not exported). Child node processes (tts_narration.mjs,
+  # upload_r2.mjs) need them via process.env. Export here.
+  export VOLC_TTS_API_KEY REVIEW_SERVER_URL DISPATCHER_TOKEN \
+         R2_ACCOUNT_ID R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_BUCKET R2_PUBLIC_BASE
+
   # 1. TTS → narration.mp3 (豆包 seed-tts-2.0-expressive)
   node "$SCRIPT_DIR/tts_narration.mjs" "$WORK_DIR"
 
