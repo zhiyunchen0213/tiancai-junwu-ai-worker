@@ -65,17 +65,23 @@ if (isKindnessCommentary) {
 
   let responseText;
   try {
-    responseText = await client.send({ system: systemPrompt, user: userPayload, max_tokens: 2000 });
+    // ClaudeClient method is generateScript({systemPrompt, userPayload}), not send().
+    // Returns the assistant text content directly.
+    responseText = await client.generateScript({ systemPrompt, userPayload });
   } catch (e) {
     console.error(`[script] Claude call failed: ${e.message}`);
     process.exit(1);
   }
 
+  // Strip markdown fences if Claude wrapped the JSON in ```json...```
+  let cleaned = String(responseText || '').trim();
+  cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+
   let scriptJson;
   try {
-    scriptJson = JSON.parse(responseText);
+    scriptJson = JSON.parse(cleaned);
   } catch (e) {
-    console.error('[script] JSON parse failed:', e.message, 'response:', responseText.slice(0, 500));
+    console.error('[script] JSON parse failed:', e.message, 'response:', cleaned.slice(0, 500));
     process.exit(3);
   }
 
