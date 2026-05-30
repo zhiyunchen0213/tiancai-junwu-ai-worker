@@ -94,13 +94,20 @@ const languageCode = (process.env.COMMENTARY_LANGUAGE_CODE || '').trim() || unde
 
 console.log(`[tts] voice_id=${voiceId} sub_model=${subModel}${languageCode ? ` lang=${languageCode}` : ''}`);
 
-const fullText = [
-  script.hook,
-  ...(Array.isArray(script.events) ? script.events : []),
-  script.tease,
-  script.cta && script.cta.text,
-  script.reveal,
-].filter(Boolean).join(' ');
+// kindness-reversal-commentary script.json is an array of {start_sec, end_sec, text}
+// segments (Task 10 generate_script.mjs kindness branch). commentary-remix script.json
+// is an object with {hook, events[], tease, cta, reveal} fields. Detect by shape and
+// concat narration text either way.
+const fullText = Array.isArray(script)
+  ? script.map(seg => (seg && typeof seg.text === 'string') ? seg.text : '')
+      .filter(t => t && t.trim()).join(' ')
+  : [
+      script.hook,
+      ...(Array.isArray(script.events) ? script.events : []),
+      script.tease,
+      script.cta && script.cta.text,
+      script.reveal,
+    ].filter(Boolean).join(' ');
 
 // 豆包文档没明说 single session text length 上限, 但 expressive 模型对短句友好,
 // 长段 commentary (~5000 字) 实测可单次合成. 这里保留宽松 hard cap 防爆.
