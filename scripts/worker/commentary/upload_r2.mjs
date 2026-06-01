@@ -71,8 +71,11 @@ export async function uploadKindnessCommentaryToR2(workDir, taskId) {
   const manifest = {};
 
   // 1. Upload the pack zip (REQUIRED — the primary deliverable)
+  //    R2 key 含 taskId (2026-06-01): 旧 `kindness-commentary-pack.zip` 让员工同时下
+  //    多个解说包浏览器会自动加 (1)(2) 分不清; 改成 `kindness-commentary-<taskId>.zip`
+  //    每条任务文件名唯一. 本地 workDir 里仍叫 kindness-commentary-pack.zip (worker 内部约定).
   const zipPath = join(workDir, 'kindness-commentary-pack.zip');
-  const zipR2Key = `commentary/${taskId}/kindness-commentary-pack.zip`;
+  const zipR2Key = `commentary/${taskId}/kindness-commentary-${taskId}.zip`;
   console.error(`[upload_r2] PUT ${zipR2Key}`);
   const zipSize = await putFile(client, bucket, zipR2Key, zipPath, 'application/zip');
   manifest.pack_zip = { r2_key: zipR2Key, size_bytes: zipSize, uploaded_at: uploadedAt };
