@@ -128,7 +128,46 @@ PYEOF
     rm -f "$METADATA_JSON"
   fi
 
-  # 4. Build README.txt with employee instructions for the zip pack.
+  # 4. Generate 运营文案.md — human-friendly markdown from metadata.json so 员工
+  #    can copy-paste straight into YouTube. Keep metadata.json too (worker debug /
+  #    tooling), 但 README 主推 .md 版本. 跟剧情向 short 剪辑包 "运营文案.md" 对齐.
+  OPS_DOC="$WORK_DIR/运营文案.md"
+  if [[ -f "$METADATA_JSON" ]]; then
+    python3 <<PYEOF
+import json
+m = json.load(open(r"$METADATA_JSON"))
+title = m.get('title') or '(待补充)'
+desc  = m.get('description') or '(待补充)'
+tags  = m.get('tags') or []
+cover = m.get('cover_overlay_text') or ''
+tags_line = ' '.join('#' + t.lstrip('#') for t in tags) if tags else '(无)'
+md = f"""# 运营文案 — 解说赛道
+
+## 标题
+{title}
+
+## 封面文字（叠加在视频封面图上）
+{cover or '(无)'}
+
+## 描述
+{desc}
+
+## 标签（复制粘贴到 YouTube tags 输入框）
+{tags_line}
+
+---
+
+⚠️ **重要**：不要复用原视频的标题或描述，YouTube reuse-content policy 会判同质化。
+建议推到跟原 channel 不同的 YouTube 频道发布，规避账号关联触发的同质化检测。
+
+> 完整解说稿见 `narration.srt` / `narration.mp3`。剪辑时原视频音轨降至 ~20% 让 AI 解说突出。
+"""
+open(r"$OPS_DOC", "w", encoding="utf-8").write(md)
+print("[phase_c] 运营文案.md generated")
+PYEOF
+  fi
+
+  # 5. Build README.txt with employee instructions for the zip pack.
   cat > "$WORK_DIR/README.txt" <<'README'
 真善美 → 解说赛道 剪辑包
 
@@ -137,8 +176,9 @@ PYEOF
 - published.mp4   : 你之前剪辑发布到 YouTube 的真善美短视频成片 (yt-dlp 抓取)
 - narration.mp3   : AI 生成的英文解说配音 (天才说书人 voice, Dacey)
 - narration.srt   : 解说字幕 (含时间戳 + 英文文本)
-- metadata.json   : 推荐的新 YouTube 元数据 (title / description / tags / cover_overlay_text)
-                    避免 reuse-content policy 命中, 标题/描述/标签都重新设计
+- 运营文案.md     : 推荐发布文案 (人话 markdown, 标题/封面/描述/标签都准备好)
+                    ★ 优先看这个, 直接复制粘贴到 YouTube ★
+- metadata.json   : 同上但 JSON 格式 (给工具读, 员工不用看)
 
 剪辑建议 (剪映 / Premiere)
 ==========================
@@ -151,7 +191,7 @@ PYEOF
    - 或对原视频做 1.1-1.3x 加速来对齐 narration 节奏
 4. 把 narration.srt 导入字幕轨道, 选你喜欢的字体/颜色/位置
 5. 导出新成片
-6. 上传 YouTube 时使用 metadata.json 里的 title/description/tags
+6. 上传 YouTube 时打开 运营文案.md, 复制标题/封面/描述/标签到对应输入框
    ⚠️ 重要: 不要用原 published 视频的标题或描述, YouTube reuse content policy 会判同质化
 
 注意
@@ -161,7 +201,7 @@ PYEOF
 README
   echo "[phase_c] README.txt written"
 
-  # 5. Build commentary pack zip {published.mp4, narration.mp3, narration.srt, metadata.json?, README.txt}
+  # 6. Build commentary pack zip {published.mp4, narration.mp3, narration.srt, metadata.json?, 运营文案.md?, README.txt}
   PACK_ZIP="$WORK_DIR/kindness-commentary-pack.zip"
   cp "$WORK_DIR/original.mp4" "$WORK_DIR/published.mp4"
   # Use stored zip (no compression) — mp4/mp3 are already compressed, gain ~0%.
@@ -169,6 +209,7 @@ README
   ZIP_FILES=(-j "$WORK_DIR/published.mp4" "$WORK_DIR/narration.mp3")
   [[ -f "$NARRATION_SRT" ]] && ZIP_FILES+=("$NARRATION_SRT")
   [[ -f "$METADATA_JSON" ]] && ZIP_FILES+=("$METADATA_JSON")
+  [[ -f "$OPS_DOC" ]] && ZIP_FILES+=("$OPS_DOC")
   ZIP_FILES+=("$WORK_DIR/README.txt")
   rm -f "$PACK_ZIP"
   zip -0 "$PACK_ZIP" "${ZIP_FILES[@]}" > "$WORK_DIR/zip.log" 2>&1
